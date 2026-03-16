@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="0">
+        <!-- Instant Credit must be a primary method to appear as its own checkout option. -->
+        <record id="payment_method_instant_credit" model="payment.method">
+            <field name="name">Financiación (Instant Credit Sabadell)</field>
+            <field name="code">instant_credit</field>
+            <field name="sequence">20</field>
+            <field name="active">True</field>
+            <field name="image" type="base64" file="payment_paycomet_jetframe/static/img/instant_credit.png"/>
+            <field name="support_tokenization">False</field>
+            <field name="support_express_checkout">False</field>
+            <field name="support_refund">partial</field>
+        </record>
+    </data>
+</odoo>

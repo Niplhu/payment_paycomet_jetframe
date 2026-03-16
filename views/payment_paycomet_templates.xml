@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <template id="redirect_form">
+        <form t-att-action="form_url" method="get" id="o_payment_redirect_form"/>
+    </template>
+
+    <template id="inline_form">
+        <div class="alert alert-info mb-0">
+            Se abrirá el formulario seguro de Paycomet para completar el pago.
+        </div>
+    </template>
+
+</odoo>

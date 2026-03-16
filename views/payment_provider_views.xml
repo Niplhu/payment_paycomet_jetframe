@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="payment_provider_form_jetframe" model="ir.ui.view">
+        <field name="name">payment.provider.form.jetframe</field>
+        <field name="model">payment.provider</field>
+        <field name="inherit_id" ref="payment.payment_provider_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//group[@name='provider_credentials']" position="inside">
+                <group string="Paycomet JET" invisible="code != 'jetframe'" name="jetframe_credentials">
+                    <field name="paycomet_terminal_id" required="code == 'jetframe' and state != 'disabled'"/>
+                    <field name="paycomet_api_key" password="True" required="code == 'jetframe' and state != 'disabled'"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

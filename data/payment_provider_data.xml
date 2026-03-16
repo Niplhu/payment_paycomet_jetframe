@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <record id="payment_provider_jetframe" model="payment.provider">
+        <field name="name">Paycomet JET</field>
+        <field name="code">jetframe</field>
+        <field name="module_id" ref="base.module_payment_paycomet_jetframe"/>
+        <field name="redirect_form_view_id" ref="redirect_form"/>
+        <field name="inline_form_view_id" ref="inline_form"/>
+        <field name="state">test</field>
+        <field name="is_published">True</field>
+        <field name="paycomet_terminal_id">1</field>
+        <field name="paycomet_api_key">test_api_key_secret</field>
+        <field name="payment_method_ids"
+               eval="[(6, 0, [ref('payment.payment_method_card'), ref('payment_paycomet_jetframe.payment_method_instant_credit')])]"/>
+    </record>
+</odoo>

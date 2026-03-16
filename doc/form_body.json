@@ -1,0 +1,14 @@
+{
+  "operationType": 1,
+  "terminal": 60811,
+  "payment": {
+    "terminal": 60811,
+    "methods": [1],
+    "order": "PAY987654321",
+    "amount": "202",
+    "currency": "EUR",
+    "secure": 1,
+    "urlOk": "https://rich-goosewinged-annabell.ngrok-free.dev/payment/jetframe/return?reference=TEST&status=ok",
+    "urlKo": "https://rich-goosewinged-annabell.ngrok-free.dev/payment/jetframe/return?reference=TEST&status=ko"
+  }
+}
