@@ -1,17 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- noupdate=1: preserve any admin customisations across module upgrades -->
     <data noupdate="1">
-        <!-- Instant Credit must be a primary method to appear as its own checkout option. -->
+        <!--
+            Instant Credit — Financiación Sabadell Consumer via Paycomet (methodId=33)
+
+            Notes:
+            - primary_payment_method_id is NOT set: IC appears as a standalone option
+              in the checkout (not as a sub-option of "card").
+            - support_tokenization=False: IC cannot be saved as a token for future use.
+            - support_express_checkout=False: IC requires a full hosted form.
+            - The inline_form_view_id for this method is set on the payment.provider
+              record (see payment_provider_data.xml) so Odoo shows the IC-specific
+              info badge when this method is selected.
+        -->
         <record id="payment_method_instant_credit" model="payment.method">
-            <field name="name">Financiación (Instant Credit Sabadell)</field>
+            <field name="name">Financiación instantánea (Sabadell Consumer)</field>
             <field name="code">instant_credit</field>
             <field name="sequence">20</field>
             <field name="active">True</field>
+            <!--
+                Minimal 1×1 transparent PNG placeholder.
+                Replace with the actual Sabadell/Instant Credit logo in production:
+                base64-encode a PNG and paste it here.
+            -->
             <field name="image">iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==</field>
             <field name="support_tokenization">False</field>
             <field name="support_express_checkout">False</field>
-            <!-- Refund support removed: no _send_refund_request implementation -->
         </record>
     </data>
 </odoo>

@@ -1,6 +1,7 @@
 import ipaddress
 import logging
 import re
+import time
 from urllib.parse import urlencode, urlsplit
 
 try:
@@ -21,15 +22,24 @@ PAYCOMET_FORM_URL = "https://rest.paycomet.com/v1/form"
 PAYCOMET_OPERATION_INFO_URL = "https://rest.paycomet.com/v1/payments/{order}/info"
 
 # ---------------------------------------------------------------------------
-# Paycomet payment method IDs (methodId field in /v1/form)
+# Paycomet method IDs (sent in `methods` array of /v1/form payload)
 # ---------------------------------------------------------------------------
-PAYCOMET_METHOD_CARD = 1
-PAYCOMET_METHOD_INSTANT_CREDIT = 33
+PAYCOMET_METHOD_CARD = 1           # Standard credit/debit card (3DS)
+PAYCOMET_METHOD_INSTANT_CREDIT = 33  # Sabadell Instant Credit financing
+
+# Instant Credit: minimum amount in EUR required by Paycomet/Sabadell.
+# Transactions below this limit are rejected with errorCode 1110.
+IC_MINIMUM_AMOUNT_EUR = 100.0
+
+# Instant Credit is only available for Spanish residents.
+# The billAddrCountry must be 724 (ISO 3166-1 numeric for Spain).
+IC_REQUIRED_COUNTRY_NUMERIC = '724'
 
 # ---------------------------------------------------------------------------
-# Local error code map — avoids blocking API calls in the payment flow.
+# Local error code map
+# is_cancel=True  → _set_canceled (user abandoned intentionally)
+# is_cancel=False → _set_error    (payment rejected, system error)
 # Source: https://docs.paycomet.com/es/api/error-codes
-# is_cancel=True → use _set_canceled; False → use _set_error
 # ---------------------------------------------------------------------------
 PAYCOMET_ERROR_CODES = {
     # Cancelaciones / abandonos
@@ -46,17 +56,22 @@ PAYCOMET_ERROR_CODES = {
     1110: ("El importe mínimo requerido no se ha alcanzado.", False),
     1111: ("El importe supera el máximo permitido.", False),
     1112: ("Importe no válido.", False),
-    # 3D Secure / autenticación
+    # 3D Secure
     1123: ("Autenticación 3D Secure fallida.", False),
     1124: ("Tiempo de espera agotado durante la autenticación 3DS.", False),
     1125: ("El banco emisor no soporta 3D Secure.", False),
-    # Técnicos / comunicación
+    # Técnicos
     1000: ("Error interno de Paycomet. Inténtalo de nuevo.", False),
     1001: ("Terminal no encontrado o inactivo.", False),
     1002: ("Credenciales de terminal incorrectas.", False),
     1050: ("Referencia de pedido duplicada.", False),
     1053: ("La orden ya fue procesada.", False),
-    # Instant Credit
+    # Instant Credit — códigos específicos de financiación Sabadell
+    9001: ("Solicitud de financiación rechazada.", False),
+    9002: ("Datos del solicitante incorrectos o incompletos.", False),
+    9003: ("El NIF/NIE introducido no es válido.", False),
+    9004: ("El IBAN introducido no es válido.", False),
+    9005: ("El solicitante no cumple los requisitos de scoring.", False),
     9050: ("Solicitud de crédito rechazada por el proveedor financiero.", False),
     9051: ("Documentación requerida para el crédito no disponible.", False),
     9055: ("Límite de crédito superado.", False),
@@ -93,8 +108,8 @@ def _parse_error_code(raw):
 
 def _resolve_error(error_code):
     """
-    Return (user_message: str, is_cancel: bool) for a Paycomet error code.
-    Never makes network calls — uses the local map only.
+    Return (user_message: str, is_cancel: bool).
+    Uses the local map only — no network calls.
     """
     code = _parse_error_code(error_code)
     if code is None:
@@ -108,6 +123,10 @@ def _resolve_error(error_code):
 class PaymentTransaction(models.Model):
     _inherit = 'payment.transaction'
 
+    # -------------------------------------------------------------------------
+    # Extra fields for Paycomet JET
+    # -------------------------------------------------------------------------
+
     paycomet_order = fields.Char(
         string="Paycomet Order Ref",
         readonly=True,
@@ -115,8 +134,16 @@ class PaymentTransaction(models.Model):
         help="Referencia de orden enviada a Paycomet (máx. 12 chars alfanuméricos).",
     )
 
+    paycomet_is_instant_credit = fields.Boolean(
+        string="Instant Credit",
+        readonly=True,
+        copy=False,
+        default=False,
+        help="Indica si esta transacción se procesó como financiación Instant Credit de Paycomet.",
+    )
+
     # =========================================================================
-    # Odoo hook: rendering values (called during payment initiation)
+    # Odoo hook: rendering values
     # =========================================================================
 
     def _get_specific_rendering_values(self, processing_values):
@@ -133,22 +160,26 @@ class PaymentTransaction(models.Model):
         return values
 
     # =========================================================================
-    # Core: call /v1/form and return the challenge URL
+    # Core: call /v1/form → challengeUrl
     # =========================================================================
 
     def _jetframe_get_challenge_url(self, processing_values=None):
         """
-        Server-side call to Paycomet /v1/form.
+        Build the Paycomet /v1/form payload and return the challengeUrl.
 
-        Returns the challengeUrl string or raises ValidationError.
+        Card:
+          - methods: [1], secure: 1 (forces 3DS)
+          - urlOk → DONE state
 
-        Both CARD and INSTANT_CREDIT use /v1/form (JetFrame hosted form).
-        The difference is the `methods` list sent in the payload.
-
-        NEVER call /v1/payments here — that is the direct charge API (requires
-        a stored token) and has nothing to do with JetFrame.
+        Instant Credit:
+          - methods: [33], secure: 0 (IC has its own scoring auth, not 3DS)
+          - order ref MUST start with a digit
+          - billAddrCountry is MANDATORY and must be 724 (Spain)
+          - urlOk → PENDING state (financing decision is async)
+          - S2S notify → DONE when Sabadell confirms
         """
         self.ensure_one()
+
         if req_lib is None:
             raise ValidationError(
                 _("La dependencia Python 'requests' no está instalada en el servidor.")
@@ -166,11 +197,23 @@ class PaymentTransaction(models.Model):
         if self.amount <= 0:
             raise ValidationError(_("El importe del pago debe ser mayor que cero."))
 
+        # Determine payment method before building the rest of the payload
+        method_id = self._jetframe_payment_method_id(processing_values)
+        is_ic = (method_id == PAYCOMET_METHOD_INSTANT_CREDIT)
+
+        # Persist the IC flag on the transaction so we can read it at notify time
+        self.sudo().write({'paycomet_is_instant_credit': is_ic})
+
+        # ── Instant Credit pre-flight validations ─────────────────────────────
+        if is_ic:
+            self._jetframe_validate_instant_credit()
+
         base_url = self._jetframe_public_base_url()
-        order_ref = self._jetframe_build_order()
+        order_ref = self._jetframe_build_order(is_instant_credit=is_ic)
         self.sudo().write({'paycomet_order': order_ref})
 
         amount_cents = self._jetframe_amount_in_cents()
+        client_ip = self._jetframe_client_ip()
 
         url_ok = "{base}/payment/jetframe/return?{qs}".format(
             base=base_url,
@@ -182,40 +225,36 @@ class PaymentTransaction(models.Model):
         )
         url_notify = "{base}/payment/jetframe/notify".format(base=base_url)
 
-        method_id = self._jetframe_payment_method_id(processing_values)
-        client_ip = self._jetframe_client_ip()
-
-        # -----------------------------------------------------------------
-        # /v1/form payload — used for ALL payment methods (card AND credit)
-        # operationType 1 = Authorization + Capture (debit)
-        # -----------------------------------------------------------------
+        # ── /v1/form payload ──────────────────────────────────────────────────
         payment_payload = {
             'terminal': terminal_id,
             'order': order_ref,
             'amount': amount_cents,
             'currency': self.currency_id.name,
-            'methods': [method_id],          # [1] = card, [33] = instant credit
+            'methods': [method_id],
             'excludedMethods': [],
-            'secure': 1,                     # Force 3DS
-            'userInteraction': 1,            # User is present in browser
+            # 3DS: ON for card, OFF for Instant Credit (IC uses own scoring/auth)
+            'secure': 0 if is_ic else 1,
+            'userInteraction': 1,
             'urlOk': url_ok,
             'urlKo': url_ko,
             'urlNotification': url_notify,
             'productDescription': (self.reference or '')[:255],
-            'merchantData': self._jetframe_merchant_data(),
+            'merchantData': self._jetframe_merchant_data(is_instant_credit=is_ic),
         }
         if client_ip:
             payment_payload['originalIp'] = client_ip
 
         payload = {
-            'operationType': 1,
+            'operationType': 1,   # 1 = Authorization + Capture
             'language': 'es',
             'payment': payment_payload,
         }
 
         _logger.info(
-            "Paycomet JET /v1/form request: ref=%s order=%s amount=%s method=%s",
-            self.reference, order_ref, amount_cents, method_id,
+            "Paycomet JET /v1/form: ref=%s order=%s amount=%s method=%s(%s) is_ic=%s",
+            self.reference, order_ref, amount_cents,
+            method_id, 'instant_credit' if is_ic else 'card', is_ic,
         )
 
         try:
@@ -229,8 +268,7 @@ class PaymentTransaction(models.Model):
             data = resp.json()
         except req_lib.exceptions.RequestException as exc:
             _logger.error(
-                "Paycomet JET: error de red llamando /v1/form ref=%s: %s",
-                self.reference, exc,
+                "Paycomet JET: red error en /v1/form ref=%s: %s", self.reference, exc,
             )
             raise ValidationError(
                 _("Error de comunicación con Paycomet. Inténtalo de nuevo.")
@@ -250,79 +288,146 @@ class PaymentTransaction(models.Model):
 
         if challenge_url and error_code == 0:
             _logger.info(
-                "Paycomet JET: challengeUrl obtenida ref=%s url=%s",
-                self.reference, challenge_url[:60] + '...',
+                "Paycomet JET: challengeUrl obtenida ref=%s url=%.60s…",
+                self.reference, challenge_url,
             )
             return challenge_url
 
-        # Error from Paycomet — surface a useful message
         error_msg, _ = _resolve_error(error_code)
-        error_from_api = data.get('errorDescription') or ''
-        final_msg = error_from_api or error_msg or _("Error desconocido de Paycomet.")
-
+        final_msg = data.get('errorDescription') or error_msg or _("Error desconocido de Paycomet.")
         _logger.error(
-            "Paycomet JET: /v1/form retornó error ref=%s code=%s desc=%s body=%s",
+            "Paycomet JET: /v1/form error ref=%s code=%s desc=%s body=%s",
             self.reference, error_code, final_msg, data,
         )
         raise ValidationError(_("Paycomet: %s") % final_msg)
 
     # =========================================================================
+    # Instant Credit — specific validations
+    # =========================================================================
+
+    def _jetframe_validate_instant_credit(self):
+        """
+        Validate pre-conditions for Instant Credit before calling /v1/form.
+
+        Raises ValidationError with a user-facing message if anything is wrong.
+        These validations avoid an unnecessary API round-trip and give the user
+        actionable feedback immediately.
+        """
+        self.ensure_one()
+
+        # 1. Minimum amount (Paycomet IC minimum is ~100 EUR)
+        if self.currency_id.name == 'EUR' and self.amount < IC_MINIMUM_AMOUNT_EUR:
+            raise ValidationError(_(
+                "La financiación Instant Credit requiere un importe mínimo de %(min)s €. "
+                "El importe actual es %(amount)s €."
+            ) % {
+                'min': IC_MINIMUM_AMOUNT_EUR,
+                'amount': self.amount,
+            })
+
+        # 2. Country — IC only available for Spain
+        partner = self.partner_id.commercial_partner_id
+        country_numeric = self._jetframe_country_numeric(partner.country_id)
+        if not country_numeric:
+            # Try company country as fallback
+            country_numeric = self._jetframe_country_numeric(
+                self.company_id.partner_id.country_id
+            )
+
+        if country_numeric != IC_REQUIRED_COUNTRY_NUMERIC:
+            raise ValidationError(_(
+                "La financiación Instant Credit solo está disponible para residentes en España. "
+                "El país de facturación del cliente debe ser España."
+            ))
+
+        # 3. Billing address — required by Paycomet for IC scoring
+        if not partner.street or not partner.city or not partner.zip:
+            raise ValidationError(_(
+                "Para pagar con financiación Instant Credit es necesario "
+                "que el cliente tenga dirección de facturación completa "
+                "(calle, ciudad y código postal)."
+            ))
+
+    # =========================================================================
     # Helpers — computation & formatting
     # =========================================================================
 
-    def _jetframe_public_base_url(self):
+    def _jetframe_is_instant_credit(self):
         """
-        Return the public HTTPS base URL for Odoo.
+        Return True if this transaction is for Instant Credit.
 
-        In test mode (provider.state == 'test') HTTP is also accepted to
-        allow development without a TLS tunnel.
-        """
-        self.ensure_one()
-        base_url = (self.provider_id.get_base_url() or '').strip().rstrip('/')
-        if not base_url:
-            raise ValidationError(
-                _("Configura la URL base pública de Odoo (Ajustes → web.base.url).")
-            )
-
-        parsed = urlsplit(base_url)
-        if not parsed.scheme or not parsed.netloc:
-            raise ValidationError(_("La URL base pública de Odoo no es válida: %s") % base_url)
-
-        is_production = self.provider_id.state == 'enabled'
-        if is_production and parsed.scheme != 'https':
-            raise ValidationError(_(
-                "Paycomet requiere HTTPS en producción. "
-                "Actualiza Ajustes → Parámetros técnicos → web.base.url a https://..."
-            ))
-
-        if parsed.scheme != 'https':
-            _logger.warning(
-                "Paycomet JET: URL base no es HTTPS (%s). Aceptado en modo test, "
-                "pero Paycomet puede rechazar la llamada.",
-                base_url,
-            )
-
-        return base_url
-
-    def _jetframe_build_order(self):
-        """
-        Build a Paycomet order reference from self.reference.
-
-        Paycomet rules:
-        - Only alphanumeric [A-Z0-9]
-        - 4–12 characters
+        Reads from the persisted field paycomet_is_instant_credit so it works
+        reliably at any point in the transaction lifecycle, including when the
+        S2S notify arrives (where processing_values is not available).
         """
         self.ensure_one()
+        return bool(self.paycomet_is_instant_credit)
+
+    def _jetframe_payment_method_id(self, processing_values=None):
+        """
+        Return the Paycomet methodId integer for the selected payment method.
+
+        Resolution order:
+        1. processing_values['payment_method_code']
+        2. processing_values['payment_method_id'] → payment.method record
+        3. self.payment_method_id.code
+        """
+        self.ensure_one()
+        code = ''
+
+        if processing_values:
+            code = (processing_values.get('payment_method_code') or '').strip().lower()
+            if not code and processing_values.get('payment_method_id'):
+                pm = self.env['payment.method'].browse(
+                    processing_values['payment_method_id']
+                )
+                if pm.exists():
+                    code = (pm.code or '').strip().lower()
+
+        if not code and self.payment_method_id:
+            code = (self.payment_method_id.code or '').strip().lower()
+
+        if code in ('instant_credit', 'credit'):
+            return PAYCOMET_METHOD_INSTANT_CREDIT
+        return PAYCOMET_METHOD_CARD
+
+    def _jetframe_build_order(self, is_instant_credit=False):
+        """
+        Build a valid Paycomet order reference from self.reference.
+
+        Paycomet rules (both methods):
+          - Only [A-Z0-9], 4–12 characters
+
+        Instant Credit ADDITIONAL rule:
+          - MUST start with a digit (no leading letters whatsoever)
+          Reason: IC references are processed by Sabadell's backend, which
+          requires numeric-only or digit-leading alphanumeric identifiers.
+        """
+        self.ensure_one()
+
+        # Strip all non-alphanumeric characters
         ref = re.sub(r'[^A-Za-z0-9]', '', (self.reference or '').upper())
+
+        if is_instant_credit:
+            # Remove all leading letters — IC refs must start with a digit
+            ref = re.sub(r'^[A-Z]+', '', ref)
+
+        # Stable numeric suffix derived from the transaction ID (always unique)
+        tx_suffix = str(self.id or 0).zfill(10)
 
         if ref and len(ref) >= 4:
             return ref[:12]
 
-        # Fallback: TX + zero-padded transaction ID (always >= 4 chars, always unique)
-        tx_id = str(self.id or 0).zfill(10)
         if ref:
-            return (ref + tx_id)[:12]
-        return ('TX' + tx_id)[:12]
+            combined = (ref + tx_suffix)[:12]
+            if len(combined) >= 4:
+                return combined
+
+        # Full fallback
+        if is_instant_credit:
+            # Guaranteed digit-leading: just the zero-padded TX id
+            return tx_suffix[:12]
+        return ('TX' + tx_suffix)[:12]
 
     def _jetframe_amount_in_cents(self):
         """Convert self.amount to Paycomet integer cents string."""
@@ -333,24 +438,32 @@ class PaymentTransaction(models.Model):
             return str(int(round(self.amount)))
         return str(int(round(self.amount * (10 ** decimals))))
 
-    def _jetframe_payment_method_id(self, processing_values=None):
-        """Return the Paycomet methodId integer for the selected payment method."""
+    def _jetframe_public_base_url(self):
+        """Return the public HTTPS base URL for Odoo (enforces HTTPS in production)."""
         self.ensure_one()
-        code = ''
-        if processing_values:
-            code = processing_values.get('payment_method_code') or ''
-            if not code and processing_values.get('payment_method_id'):
-                pm = self.env['payment.method'].browse(
-                    processing_values['payment_method_id']
-                )
-                code = pm.code if pm.exists() else ''
-        if not code and self.payment_method_id:
-            code = self.payment_method_id.code or ''
-        code = code.strip().lower()
-
-        if code in ('credit', 'instant_credit'):
-            return PAYCOMET_METHOD_INSTANT_CREDIT
-        return PAYCOMET_METHOD_CARD
+        base_url = (self.provider_id.get_base_url() or '').strip().rstrip('/')
+        if not base_url:
+            raise ValidationError(
+                _("Configura la URL base pública de Odoo (Ajustes → web.base.url).")
+            )
+        parsed = urlsplit(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValidationError(
+                _("La URL base pública de Odoo no es válida: %s") % base_url
+            )
+        is_production = self.provider_id.state == 'enabled'
+        if is_production and parsed.scheme != 'https':
+            raise ValidationError(_(
+                "Paycomet requiere HTTPS en producción. "
+                "Actualiza Ajustes → Parámetros técnicos → web.base.url a https://..."
+            ))
+        if parsed.scheme != 'https':
+            _logger.warning(
+                "Paycomet JET: URL base no es HTTPS (%s). "
+                "Válido en test, pero Paycomet puede rechazarla.",
+                base_url,
+            )
+        return base_url
 
     def _jetframe_client_ip(self):
         """Return the real client IP, respecting reverse-proxy headers."""
@@ -382,15 +495,9 @@ class PaymentTransaction(models.Model):
         }
 
     def _jetframe_extract_challenge_url(self, payload):
-        """
-        Find the challengeUrl in a Paycomet /v1/form response.
-
-        The URL is at the top level in current API versions:
-        {"errorCode": 0, "challengeUrl": "https://jetframe.paycomet.com/..."}
-        """
+        """Find the challengeUrl in a Paycomet /v1/form response dict."""
         if not isinstance(payload, dict):
             return None
-        # Check top-level first, then common nested keys
         for container in (payload, payload.get('payment', {}), payload.get('data', {})):
             if not isinstance(container, dict):
                 continue
@@ -402,10 +509,22 @@ class PaymentTransaction(models.Model):
                         return url.strip()
         return None
 
-    def _jetframe_merchant_data(self):
-        """Build the merchantData object for the /v1/form payload."""
+    def _jetframe_merchant_data(self, is_instant_credit=False):
+        """
+        Build the merchantData object for /v1/form.
+
+        For Instant Credit:
+          - billing.billAddrCountry is MANDATORY (must be 724 for Spain)
+          - billing address fields are also included when available
+          - customer.phone is included when available (helps IC scoring)
+
+        For card:
+          - billing is sent when available but not strictly required
+        """
         self.ensure_one()
         partner = self.partner_id.commercial_partner_id
+
+        # Customer block
         parts = (partner.name or '').split()
         customer = {
             'id': str(partner.id),
@@ -414,24 +533,37 @@ class PaymentTransaction(models.Model):
         }
         if partner.email:
             customer['email'] = partner.email.strip()
+        if is_instant_credit and partner.phone:
+            # Phone helps Sabadell's scoring — send when available
+            phone = re.sub(r'[^0-9+]', '', partner.phone)
+            if phone:
+                customer['phone'] = phone[:20]
 
+        # Billing block
         billing = {}
         country_numeric = self._jetframe_country_numeric(partner.country_id)
+        if not country_numeric and is_instant_credit:
+            # For IC, fallback to company country (already validated above)
+            country_numeric = self._jetframe_country_numeric(
+                self.company_id.partner_id.country_id
+            )
         if country_numeric:
             billing['billAddrCountry'] = country_numeric
-        for field, key, maxlen in (
-            ('city', 'billAddrCity', 50),
-            ('street', 'billAddrLine1', 50),
-            ('street2', 'billAddrLine2', 50),
-            ('zip', 'billAddrPostCode', 16),
+
+        for attr, key, maxlen in (
+            ('street',  'billAddrLine1',   50),
+            ('street2', 'billAddrLine2',   50),
+            ('city',    'billAddrCity',    50),
+            ('zip',     'billAddrPostCode', 16),
         ):
-            value = getattr(partner, field, None) or ''
+            value = (getattr(partner, attr, None) or '').strip()
             if value:
                 billing[key] = value[:maxlen]
 
         result = {'customer': customer}
         if billing:
             result['billing'] = billing
+
         return result
 
     def _jetframe_country_numeric(self, country):
@@ -443,16 +575,20 @@ class PaymentTransaction(models.Model):
         return ISO_3166_NUMERIC_BY_ALPHA2.get(code)
 
     # =========================================================================
-    # Operation info — only called when strictly necessary
+    # Operation info — used only for Instant Credit OK confirmation
     # =========================================================================
 
-    def _jetframe_get_operation_info(self, order_ref, attempts=2, delay_ms=500):
+    def _jetframe_get_operation_info(self, order_ref, attempts=2, delay_ms=600):
         """
-        Query Paycomet for the current operation state.
+        Query Paycomet /v1/payments/{order}/info for the current operation state.
 
-        Only call this when the browser return does NOT carry enough data to
-        determine the final state (i.e., KO without an error code).
-        Keep attempts low — this runs synchronously in the request cycle.
+        Only used for Instant Credit, where the confirmation is asynchronous
+        and we need to know the real state at the moment urlOk fires.
+
+        Response `payment.state` values:
+          1 = Confirmed (done)
+          2 = Pending
+          3 = Rejected/Error
         """
         self.ensure_one()
         if not order_ref or req_lib is None:
@@ -465,7 +601,6 @@ class PaymentTransaction(models.Model):
         endpoint = PAYCOMET_OPERATION_INFO_URL.format(order=order_ref)
         payload = {'payment': {'terminal': int(terminal_id), 'order': order_ref}}
 
-        import time
         for attempt in range(1, attempts + 1):
             try:
                 resp = req_lib.post(
@@ -476,14 +611,14 @@ class PaymentTransaction(models.Model):
                 )
                 data = resp.json()
                 _logger.debug(
-                    "Paycomet JET operationInfo: ref=%s order=%s attempt=%s/%s resp=%s",
+                    "Paycomet JET operationInfo: ref=%s order=%s attempt=%d/%d resp=%s",
                     self.reference, order_ref, attempt, attempts, data,
                 )
                 if isinstance(data, dict):
                     return data.get('payment', data)
             except Exception as exc:
                 _logger.warning(
-                    "Paycomet JET operationInfo error: ref=%s attempt=%s/%s: %s",
+                    "Paycomet JET operationInfo error: ref=%s attempt=%d/%d: %s",
                     self.reference, attempt, attempts, exc,
                 )
             if attempt < attempts:
@@ -492,7 +627,7 @@ class PaymentTransaction(models.Model):
         return {}
 
     # =========================================================================
-    # Odoo hooks: transaction creation / post-processing
+    # Odoo hook: payment creation (ensures journal line is present)
     # =========================================================================
 
     def _create_payment(self, **extra_create_values):
@@ -502,7 +637,6 @@ class PaymentTransaction(models.Model):
 
         provider = self.provider_id
 
-        # Ensure journal has a usable inbound payment method line
         if not provider.journal_id:
             journal = self.env['account.journal'].search(
                 [('company_id', '=', provider.company_id.id), ('type', '=', 'bank')],
@@ -520,8 +654,8 @@ class PaymentTransaction(models.Model):
         if not pml:
             raise ValidationError(_(
                 "El diario del proveedor Paycomet JET no tiene ninguna línea de método "
-                "de pago entrante configurada. Ve a Contabilidad → Diarios → ← diario → "
-                "Pagos entrantes y añade una línea."
+                "de pago entrante configurada. Ve a Contabilidad → Diarios → diario → "
+                "Pagos entrantes y añade una línea para Paycomet JET."
             ))
 
         extra_create_values.setdefault('payment_method_line_id', pml.id)
@@ -535,7 +669,7 @@ class PaymentTransaction(models.Model):
         if provider_code != 'jetframe':
             return super()._get_tx_from_notification_data(provider_code, notification_data)
 
-        # 1. Try by Odoo reference (injected into urlOk/urlKo as ?reference=...)
+        # 1. By Odoo reference (injected into urlOk/urlKo as ?reference=…)
         reference = (notification_data.get('reference') or '').strip()
         if reference:
             tx = self.search(
@@ -545,11 +679,9 @@ class PaymentTransaction(models.Model):
             if tx:
                 return tx
 
-        # 2. Fallback: try by Paycomet order ref
+        # 2. Fallback: by Paycomet order ref
         order_ref = (
-            notification_data.get('order')
-            or notification_data.get('Order')
-            or ''
+            notification_data.get('order') or notification_data.get('Order') or ''
         ).strip()
         if order_ref:
             tx = self.search(
@@ -560,7 +692,7 @@ class PaymentTransaction(models.Model):
                 return tx
 
         raise ValidationError(
-            _("Paycomet JET: no se encontró la transacción. reference=%s order=%s")
+            _("Paycomet JET: transacción no encontrada. reference=%s order=%s")
             % (reference, order_ref)
         )
 
@@ -575,96 +707,133 @@ class PaymentTransaction(models.Model):
             or self.paycomet_order
             or ''
         ).strip()
+        is_ic = self._jetframe_is_instant_credit()
 
         _logger.info(
-            "Paycomet JET notification: ref=%s order=%s status=%s tx_state=%s data=%s",
-            self.reference, order_ref, status, self.state, notification_data,
+            "Paycomet JET notification: ref=%s order=%s status=%s is_ic=%s tx_state=%s",
+            self.reference, order_ref, status, is_ic, self.state,
         )
 
-        # Guard: do not re-process terminal states
+        # Guard: never re-process terminal states
         if self.state in ('done', 'cancel', 'error'):
             _logger.info(
-                "Paycomet JET: tx ref=%s already in terminal state '%s', ignoring.",
+                "Paycomet JET: ref=%s already in terminal state '%s' — ignored.",
                 self.reference, self.state,
             )
             return
 
         if status == 'ok':
-            self._jetframe_handle_ok(notification_data, order_ref)
+            self._jetframe_handle_ok(notification_data, order_ref, is_ic)
         elif status == 'ko':
-            self._jetframe_handle_ko(notification_data, order_ref)
+            self._jetframe_handle_ko(notification_data, order_ref, is_ic)
         else:
-            # Unexpected status — set error so the transaction doesn't stay in draft
             _logger.warning(
-                "Paycomet JET: unexpected status '%s' for ref=%s", status, self.reference,
+                "Paycomet JET: unknown status '%s' for ref=%s", status, self.reference,
             )
             self._set_error(_("Paycomet: estado desconocido recibido ('%s').") % status)
 
-    def _jetframe_handle_ok(self, notification_data, order_ref):
-        """Process a successful payment notification (status=ok)."""
-        self.ensure_one()
-        is_instant_credit = (self._jetframe_payment_method_id() == PAYCOMET_METHOD_INSTANT_CREDIT)
+    # =========================================================================
+    # OK / KO handlers
+    # =========================================================================
 
-        if not is_instant_credit:
-            # Standard card: urlOk only fires after bank authorization.
-            # S2S notify is authoritative but browser return can arrive first — accept it.
+    def _jetframe_handle_ok(self, notification_data, order_ref, is_ic):
+        """
+        Handle a successful return (status=ok).
+
+        CARD:
+          urlOk fires AFTER the bank has authorised the payment.
+          → Set DONE immediately.
+          The S2S notify reinforces this but the browser return is reliable.
+
+        INSTANT CREDIT:
+          urlOk fires when the user submits the financing application.
+          It does NOT mean the credit has been approved — Sabadell processes
+          the request asynchronously (seconds to hours).
+          → Always set PENDING.
+          → The S2S notify (Response=OK) later moves it to DONE.
+
+          We do call operationInfo once to catch the rare case where Sabadell
+          approves synchronously before our urlOk handler runs, but we default
+          to PENDING when uncertain.
+        """
+        self.ensure_one()
+
+        if not is_ic:
+            # ── Card ──────────────────────────────────────────────────────────
             self._set_done(
-                state_message=_("Pago autorizado y confirmado por Paycomet.")
+                state_message=_("Pago con tarjeta autorizado y confirmado por Paycomet.")
             )
             return
 
-        # Instant Credit: provider confirmation is asynchronous.
-        # Query operationInfo to get the real state before deciding.
-        op = self._jetframe_get_operation_info(order_ref, attempts=3, delay_ms=800)
+        # ── Instant Credit ────────────────────────────────────────────────────
+        # Query operationInfo to catch synchronous approvals.
+        # Keep attempts very low — this is in the browser return request cycle.
+        op = self._jetframe_get_operation_info(order_ref, attempts=2, delay_ms=600)
         op_state = _parse_error_code(op.get('state'))
 
+        _logger.info(
+            "Paycomet JET IC urlOk: ref=%s order=%s operationInfo.state=%s",
+            self.reference, order_ref, op_state,
+        )
+
         if op_state == 1:
+            # Rare: Sabadell approved synchronously before our handler ran
             self._set_done(
-                state_message=_("Crédito confirmado por Paycomet Instant Credit.")
-            )
-        elif op_state == 2:
-            self._set_pending(
                 state_message=_(
-                    "Pago en estado pendiente según Paycomet Instant Credit. "
-                    "Se confirmará automáticamente cuando el proveedor financiero lo autorice."
+                    "Financiación Instant Credit aprobada y confirmada por Paycomet."
                 )
             )
-        else:
-            # Unknown or no op info — leave as pending for manual review
-            _logger.warning(
-                "Paycomet JET: Instant Credit op_state=%s desconocido ref=%s — marcando pending",
-                op_state, self.reference,
+        elif op_state == 3:
+            # Sabadell rejected synchronously
+            error_code = op.get('errorCode') or op.get('ErrorCode')
+            user_msg, is_cancel = _resolve_error(error_code)
+            final_msg = "Paycomet IC: " + (
+                user_msg or _("Solicitud de financiación rechazada.")
             )
+            _logger.info(
+                "Paycomet JET IC: rejected synchronously ref=%s code=%s",
+                self.reference, error_code,
+            )
+            if is_cancel:
+                self._set_canceled(state_message=final_msg)
+            else:
+                self._set_error(final_msg)
+        else:
+            # state=2 (pending) or no info yet — normal async case
             self._set_pending(
                 state_message=_(
-                    "Retorno de Instant Credit recibido. Pendiente de confirmación final."
+                    "Solicitud de financiación Instant Credit enviada correctamente. "
+                    "Recibirás una confirmación cuando Sabadell procese tu solicitud "
+                    "(puede tardar unos minutos)."
                 )
             )
 
-    def _jetframe_handle_ko(self, notification_data, order_ref):
-        """Process a failed or cancelled payment notification (status=ko)."""
+    def _jetframe_handle_ko(self, notification_data, order_ref, is_ic):
+        """
+        Handle a failed or cancelled return (status=ko).
+
+        Error codes come from Paycomet URL params (browser return) or S2S body.
+        If no code is present in the notification (browser return without extra
+        Paycomet params), we call operationInfo to enrich the error details.
+        """
         self.ensure_one()
 
-        # Error code may come from Paycomet URL params (browser return) or S2S body
         error_code = (
             notification_data.get('ErrorCode')
             or notification_data.get('errorCode')
             or notification_data.get('error_code')
         )
-
         user_msg, is_cancel = _resolve_error(error_code)
 
-        # If we don't have an error code from the notification (e.g., browser return
-        # without extra Paycomet params), call operationInfo for more detail.
-        # Keep attempts low — this is in the user's request cycle.
+        # If no error code came in the notification, query operationInfo
         if not error_code and order_ref:
             op = self._jetframe_get_operation_info(order_ref, attempts=2, delay_ms=400)
             op_state = _parse_error_code(op.get('state'))
 
             if op_state == 1:
-                # operationInfo says OK despite KO return — race condition, accept as done
+                # Race condition: operationInfo says OK despite KO browser return
                 _logger.info(
-                    "Paycomet JET: operationInfo confirms state=1 despite KO return ref=%s",
+                    "Paycomet JET: operationInfo state=1 despite KO return ref=%s",
                     self.reference,
                 )
                 self._set_done(
@@ -672,19 +841,27 @@ class PaymentTransaction(models.Model):
                 )
                 return
 
-            # Enrich error info from operationInfo
-            error_code = error_code or op.get('errorCode') or op.get('ErrorCode')
+            error_code = op.get('errorCode') or op.get('ErrorCode')
             user_msg, is_cancel = _resolve_error(error_code)
+
+        if is_ic:
+            # IC-specific: differentiate between user abandonment and rejection
+            if is_cancel or not error_code:
+                # User closed the financing form without submitting → cancel
+                is_cancel = True
+                user_msg = user_msg or _("Solicitud de financiación cancelada por el usuario.")
+            else:
+                user_msg = user_msg or _("Solicitud de financiación rechazada.")
 
         final_msg = "Paycomet: " + (
             user_msg
             or notification_data.get('errorDescription')
-            or _("Pago rechazado.")
+            or (_("Financiación rechazada.") if is_ic else _("Pago rechazado."))
         )
 
         _logger.info(
-            "Paycomet JET: payment KO ref=%s error_code=%s is_cancel=%s msg=%s",
-            self.reference, error_code, is_cancel, final_msg,
+            "Paycomet JET KO: ref=%s is_ic=%s error_code=%s is_cancel=%s msg=%s",
+            self.reference, is_ic, error_code, is_cancel, final_msg,
         )
 
         if is_cancel:

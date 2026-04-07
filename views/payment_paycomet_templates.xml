@@ -1,31 +1,106 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
+
     <!--
-        redirect_form: used by _get_specific_rendering_values to carry the
-        Paycomet challenge URL to the frontend.  Odoo serialises this template
-        into processingValues.redirect_form_html; our JS reads the form's
-        action attribute and opens it in an iframe overlay instead of
-        performing a full-page redirect.
+        redirect_form
+        ─────────────
+        Used by _get_specific_rendering_values to carry the Paycomet challengeUrl
+        to the frontend. Odoo serialises this template into
+        processingValues.redirect_form_html; our JS reads the form's action
+        attribute and opens it in a Bootstrap 5 modal instead of performing
+        a full-page redirect.
     -->
     <template id="redirect_form">
         <form t-att-action="form_url" method="get" id="o_payment_redirect_form"/>
     </template>
 
     <!--
-        inline_form: shown next to the payment option while the user is on the
-        checkout page (before clicking Pay).  Communicates that the secure
-        Paycomet form will appear in a pop-up overlay on the same page.
+        inline_form — CARD
+        ──────────────────
+        Shown below the card payment option on the checkout page while the
+        user is deciding whether to pay. This template is rendered when
+        payment_method_code == 'card' (or default).
     -->
     <template id="inline_form">
         <div class="o_jetframe_inline_info alert alert-info d-flex align-items-center gap-2 mb-0 py-2">
+            <!-- Lock icon -->
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15"
                  viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
-                 class="flex-shrink-0">
+                 class="flex-shrink-0" aria-hidden="true">
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
             </svg>
-            <span>Al pulsar <strong>Pagar</strong> se abrirá el formulario seguro de Paycomet en esta misma página.</span>
+            <span>
+                Al pulsar <strong>Pagar</strong> se abrirá el formulario seguro
+                de tarjeta de Paycomet en esta misma página.
+                Tu pago está protegido con autenticación 3D Secure.
+            </span>
+        </div>
+    </template>
+
+    <!--
+        inline_form — INSTANT CREDIT
+        ─────────────────────────────
+        Shown below the Instant Credit financing option. Explains clearly
+        that this is a financing product with async approval, not an
+        instant card charge.
+    -->
+    <template id="inline_form_instant_credit">
+        <div class="o_jetframe_ic_info mb-0">
+
+            <!-- How it works -->
+            <div class="alert alert-info d-flex align-items-start gap-2 mb-2 py-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"
+                     viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+                     class="flex-shrink-0 mt-1" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                <div>
+                    <strong>Financiación instantánea Sabadell Consumer</strong><br/>
+                    <small class="text-muted">
+                        Al pulsar <strong>Solicitar financiación</strong> se abrirá
+                        el formulario de Paycomet donde podrás configurar tu préstamo
+                        (plazo, cuotas, IBAN). La aprobación es inmediata en la mayoría
+                        de los casos.
+                    </small>
+                </div>
+            </div>
+
+            <!-- Requirements -->
+            <ul class="list-unstyled mb-0 ps-1" style="font-size:0.82rem; color:#6c757d;">
+                <li>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"
+                         viewBox="0 0 24 24" fill="none" stroke="#198754"
+                         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                         class="me-1" aria-hidden="true">
+                        <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                    Importe mínimo: <strong>100 €</strong>
+                </li>
+                <li>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"
+                         viewBox="0 0 24 24" fill="none" stroke="#198754"
+                         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                         class="me-1" aria-hidden="true">
+                        <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                    Disponible solo para residentes en <strong>España</strong>
+                </li>
+                <li>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"
+                         viewBox="0 0 24 24" fill="none" stroke="#198754"
+                         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                         class="me-1" aria-hidden="true">
+                        <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                    Necesitarás tu <strong>DNI/NIE</strong> e <strong>IBAN</strong>
+                </li>
+            </ul>
+
         </div>
     </template>
 

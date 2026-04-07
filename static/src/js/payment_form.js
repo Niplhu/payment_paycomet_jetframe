@@ -62,7 +62,10 @@ PaymentForm.include({
             return this._super(...arguments);   // fallback: full-page redirect
         }
 
-        this._jetframeOpenModal(challengeUrl);
+        const isInstantCredit = (paymentMethodCode === 'instant_credit'
+                                 || paymentMethodCode === 'credit');
+
+        this._jetframeOpenModal(challengeUrl, isInstantCredit);
     },
 
     // -------------------------------------------------------------------------
@@ -70,7 +73,7 @@ PaymentForm.include({
     // Paycomet hosted form inside an iframe.
     // -------------------------------------------------------------------------
 
-    _jetframeOpenModal(url) {
+    _jetframeOpenModal(url, isInstantCredit = false) {
         // Remove any leftover modal/backdrop from a previous attempt
         this._jetframeCleanup();
 
@@ -99,23 +102,45 @@ PaymentForm.include({
         modal.setAttribute('aria-labelledby', 'o_jetframe_title');
         modal.setAttribute('tabindex', '-1');
 
+        // ── Content varies by payment method ─────────────────────────────────
+        const title = isInstantCredit
+            ? _t('Financiación instantánea — Paycomet')
+            : _t('Pago seguro — Paycomet');
+
+        const loadingText = isInstantCredit
+            ? _t('Cargando formulario de financiación…')
+            : _t('Cargando formulario de pago…');
+
+        // IC form includes personal data + IBAN + contract → needs more height
+        const modalSizeClass = isInstantCredit
+            ? 'o_jetframe_dialog o_jetframe_dialog_ic'
+            : 'o_jetframe_dialog';
+
+        // Icon: lock for card, credit/document for IC
+        const iconSvg = isInstantCredit
+            ? `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15"
+                    viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+                    class="o_jetframe_lock_icon me-2" aria-hidden="true">
+                   <rect x="1" y="4" width="22" height="16" rx="2" ry="2"/>
+                   <line x1="1" y1="10" x2="23" y2="10"/>
+               </svg>`
+            : `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15"
+                    viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                    class="o_jetframe_lock_icon me-2" aria-hidden="true">
+                   <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                   <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+               </svg>`;
+
         modal.innerHTML = `
-            <div class="modal-dialog modal-dialog-centered o_jetframe_dialog">
+            <div class="modal-dialog modal-dialog-centered ${modalSizeClass}">
                 <div class="modal-content">
 
                     <div class="modal-header o_jetframe_header">
                         <h5 class="modal-title" id="o_jetframe_title">
-                            <svg xmlns="http://www.w3.org/2000/svg"
-                                 width="15" height="15" viewBox="0 0 24 24"
-                                 fill="none" stroke="currentColor"
-                                 stroke-width="2.5" stroke-linecap="round"
-                                 stroke-linejoin="round"
-                                 class="o_jetframe_lock_icon me-2"
-                                 aria-hidden="true">
-                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                            </svg>
-                            ${_t('Pago seguro — Paycomet')}
+                            ${iconSvg}
+                            ${title}
                         </h5>
                         <button type="button"
                                 class="btn-close"
@@ -124,15 +149,15 @@ PaymentForm.include({
                         </button>
                     </div>
 
-                    <div class="modal-body p-0 o_jetframe_body">
+                    <div class="modal-body p-0 o_jetframe_body${isInstantCredit ? ' o_jetframe_body_ic' : ''}">
                         <div id="${LOADING_ID}" class="o_jetframe_loading">
                             <div class="o_jetframe_spinner"></div>
-                            <span class="text-muted">${_t('Cargando formulario de pago…')}</span>
+                            <span class="text-muted">${loadingText}</span>
                         </div>
                         <iframe
                             id="${IFRAME_ID}"
                             src="${url}"
-                            title="${_t('Formulario de pago seguro de Paycomet')}"
+                            title="${_t('Formulario seguro de Paycomet')}"
                             allow="payment"
                             class="o_jetframe_iframe d-none"
                             scrolling="yes"
