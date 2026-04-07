@@ -2,7 +2,10 @@
 <odoo>
 
     <template id="redirect_form">
-        <form t-att-action="form_url" method="get" id="o_payment_redirect_form"/>
+        <form t-att-action="form_url" method="get" id="o_payment_redirect_form">
+            <input t-if="reference" type="hidden" name="reference" t-att-value="reference"/>
+            <input t-if="order" type="hidden" name="order" t-att-value="order"/>
+        </form>
     </template>
 
     <template id="inline_form">

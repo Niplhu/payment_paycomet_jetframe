@@ -95,8 +95,8 @@ class TestPaycometJetframe(PaymentCommon):
         self.assertEqual(captured_payload['json']['payment']['terminal'], 1)
         self.assertEqual(captured_payload['json']['payment']['productDescription'], tx.reference)
         self.assertEqual(captured_payload['json']['language'], 'es')
-        self.assertEqual(captured_payload['url'], 'https://rest.paycomet.com/v1/payments')
-        self.assertNotIn('urlNotification', captured_payload['json']['payment'])
+        self.assertEqual(captured_payload['url'], 'https://rest.paycomet.com/v1/form')
+        self.assertIn('urlNotification', captured_payload['json']['payment'])
         self.assertEqual(
             tx.paycomet_order,
             '123456789012',
@@ -139,6 +139,24 @@ class TestPaycometJetframe(PaymentCommon):
             values = tx._get_specific_rendering_values({})
 
         self.assertEqual(values['form_url'], 'https://example.com/challenge')
+
+    def test_rendering_values_patch_test_form_url_when_provider_not_enabled(self):
+        tx = self._create_transaction(flow='redirect')
+        tx.provider_id.state = 'test'
+
+        with patch(
+            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
+            return_value=_FakeResponse({
+                'errorCode': 0,
+                'challengeUrl': 'https://checkout.paycomet.com/api/transaction/abc123',
+            }),
+        ):
+            values = tx._get_specific_rendering_values({'payment_method_code': 'card'})
+
+        self.assertEqual(
+            values['form_url'],
+            'https://checkout.paycomet.com/api/test/transaction/abc123',
+        )
 
     def test_get_tx_from_notification_data_requires_reference_or_order(self):
         tx = self._create_transaction(flow='redirect')

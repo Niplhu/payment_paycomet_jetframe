@@ -262,6 +262,16 @@ class PaymentTransaction(models.Model):
                         return challenge_url.strip()
         return None
 
+    def _jetframe_normalize_form_url(self, challenge_url, provider=None):
+        self.ensure_one()
+        provider = provider or self.provider_id
+        if not challenge_url or not provider or provider.state == 'enabled':
+            return challenge_url
+
+        return challenge_url.replace(
+            '/api/transaction/', '/api/test/transaction/', 1,
+        )
+
     def _jetframe_get_selected_payment_method_code(self, processing_values=None):
         self.ensure_one()
         payment_method_code = None
@@ -515,12 +525,7 @@ class PaymentTransaction(models.Model):
 
         challenge_url = self._jetframe_extract_challenge_url(data)
         if challenge_url and (error_code == 0 or not has_error_code):
-            # In test mode, IC returns production URLs — patch to test endpoint
-            if is_instant_credit and provider.state != 'enabled':
-                challenge_url = challenge_url.replace(
-                    '/api/transaction/', '/api/test/transaction/', 1
-                )
-            return challenge_url
+            return self._jetframe_normalize_form_url(challenge_url, provider=provider)
 
         _logger.warning("Paycomet JET: respuesta no usable endpoint=%s ref=%s body=%s", endpoint, self.reference, data)
         error_msg, is_cancel = self._jetframe_resolve_error(error_code, terminal_id)

@@ -117,6 +117,8 @@ PaymentForm.include({
                             name="${IFRAME_ID}"
                             title="${_t('Formulario de pago seguro de Paycomet')}"
                             allow="payment"
+                            sandbox="allow-top-navigation allow-scripts allow-same-origin allow-forms allow-popups"
+                            referrerpolicy="strict-origin-when-cross-origin"
                             class="o_jetframe_iframe d-none"
                             scrolling="yes"
                         ></iframe>
@@ -132,13 +134,10 @@ PaymentForm.include({
         const iframe = modal.querySelector(`#${IFRAME_ID}`);
         const loading = modal.querySelector(`#${LOADING_ID}`);
         const form = redirectForm;
+        const formUrl = form.getAttribute('action') || '';
         const txReference = form.querySelector('input[name="reference"]')?.value || null;
         const txOrder = form.querySelector('input[name="order"]')?.value || null;
         let isClosed = false;
-
-        form.setAttribute('target', IFRAME_ID);
-        form.classList.add('d-none');
-        modal.appendChild(form);
 
         const breakoutToTop = (url = '/payment/status') => {
             if (isClosed) {
@@ -216,6 +215,12 @@ PaymentForm.include({
             this._jetframeEnablePayButton();
         };
 
+        if (!formUrl) {
+            close();
+            window.location.href = '/payment/status';
+            return;
+        }
+
         this._jetframePollTimer = window.setInterval(() => {
             inspectIframeLocation();
         }, 400);
@@ -258,13 +263,7 @@ PaymentForm.include({
         };
         window.addEventListener('message', this._jetframeOnMessage);
 
-        try {
-            form.submit();
-        } catch (_) {
-            close();
-            window.location.href = form.getAttribute('action') || window.location.href;
-            return;
-        }
+        iframe.src = formUrl;
 
         modal.querySelector('#o_jetframe_close').addEventListener('click', close);
         modal.addEventListener('click', (ev) => {
