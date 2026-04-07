@@ -272,8 +272,7 @@ class PaymentTransaction(models.Model):
             'order': order_ref,
             'amount': amount_cents,
             'currency': self.currency_id.name,
-            # 3DS: ON for card, OFF for Instant Credit (IC uses own scoring/auth)
-            'secure': 0 if is_ic else 1,
+            'secure': 1,
             'userInteraction': 1,
             'urlOk': url_ok,
             'urlKo': url_ko,
@@ -286,7 +285,10 @@ class PaymentTransaction(models.Model):
         if is_ic:
             payment_payload['methodId'] = method_id
             endpoint = self._jetframe_payments_url()
-            payload = {'payment': payment_payload}
+            payload = {
+                'language': 'es',
+                'payment': payment_payload,
+            }
             log_label = '/v1/payments'
         else:
             payment_payload.update({
@@ -716,6 +718,7 @@ class PaymentTransaction(models.Model):
         """
         self.ensure_one()
         partner = self.partner_id.commercial_partner_id
+        company_partner = self.company_id.partner_id.commercial_partner_id
 
         # Customer block
         parts = (partner.name or '').split()
@@ -726,23 +729,15 @@ class PaymentTransaction(models.Model):
         }
         if partner.email:
             customer['email'] = partner.email.strip()
-        if is_instant_credit:
-            # PAYCOMET documents homePhone/mobilePhone/workPhone.
-            mobile_phone = re.sub(r'[^0-9+]', '', partner.mobile or '')[:20]
-            home_phone = re.sub(r'[^0-9+]', '', partner.phone or '')[:20]
-            if mobile_phone:
-                customer['mobilePhone'] = mobile_phone
-            elif home_phone:
-                customer['homePhone'] = home_phone
 
         # Billing block
+        billing_partner = partner if partner.exists() else company_partner
         billing = {}
-        country_numeric = self._jetframe_country_numeric(partner.country_id)
-        if not country_numeric and is_instant_credit:
-            # For IC, fallback to company country (already validated above)
-            country_numeric = self._jetframe_country_numeric(
-                self.company_id.partner_id.country_id
-            )
+        partner_country_numeric = self._jetframe_country_numeric(billing_partner.country_id)
+        company_country_numeric = self._jetframe_country_numeric(company_partner.country_id)
+        country_numeric = partner_country_numeric or company_country_numeric
+        if is_instant_credit and company_country_numeric:
+            country_numeric = company_country_numeric
         if country_numeric:
             billing['billAddrCountry'] = country_numeric
 
@@ -752,12 +747,9 @@ class PaymentTransaction(models.Model):
             ('city',    'billAddrCity',    50),
             ('zip',     'billAddrPostCode', 16),
         ):
-            value = (getattr(partner, attr, None) or '').strip()
+            value = (getattr(billing_partner, attr, None) or '').strip()
             if value:
                 billing[key] = value[:maxlen]
-
-        if partner.state_id and partner.state_id.name:
-            billing['billAddrState'] = partner.state_id.name.strip()[:50]
 
         result = {'customer': customer}
         if billing:

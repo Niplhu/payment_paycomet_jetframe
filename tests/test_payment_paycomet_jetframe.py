@@ -111,7 +111,7 @@ class TestPaycometJetframe(PaymentCommon):
         self.assertEqual(captured_payload['json']['payment']['terminal'], 1)
         self.assertEqual(captured_payload['json']['payment']['productDescription'], tx.reference)
         self.assertEqual(captured_payload['url'], 'https://rest.paycomet.com/v1/payments')
-        self.assertNotIn('language', captured_payload['json'])
+        self.assertEqual(captured_payload['json']['language'], 'es')
         self.assertNotIn('operationType', captured_payload['json'])
         self.assertNotIn('urlNotification', captured_payload['json']['payment'])
         self.assertEqual(
@@ -143,7 +143,7 @@ class TestPaycometJetframe(PaymentCommon):
             tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
 
     @mute_logger('odoo.addons.payment_paycomet_jetframe.models.payment_transaction')
-    def test_instant_credit_merchant_data_uses_documented_phone_fields(self):
+    def test_instant_credit_merchant_data_keeps_customer_block_compatible(self):
         tx = self._create_transaction(flow='redirect', amount=200.0)
         tx.payment_method_id = self.credit_payment_method
         tx.partner_id.mobile = '+34 600 11 22 33'
@@ -162,8 +162,8 @@ class TestPaycometJetframe(PaymentCommon):
             tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
 
         customer = captured_payload['json']['payment']['merchantData']['customer']
-        self.assertEqual(customer.get('mobilePhone'), '+34600112233')
-        self.assertNotIn('phone', customer)
+        self.assertNotIn('mobilePhone', customer)
+        self.assertNotIn('homePhone', customer)
 
     def test_rendering_values_surface_paycomet_http_422_message(self):
         tx = self._create_transaction(flow='redirect', amount=200.0)
