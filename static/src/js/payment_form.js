@@ -3,32 +3,28 @@
 /**
  * Paycomet JET Frame — Odoo 18 payment form integration.
  *
- * TWO flows depending on the payment method:
+ * Both CARD and INSTANT CREDIT open their challengeUrl in a Bootstrap 5
+ * modal iframe overlay on the checkout page.
  *
  * ── CARD (methodId=1) ───────────────────────────────────────────────────────
- *   challengeUrl is served from jetframe.paycomet.com, which ALLOWS iframe
- *   embedding. We open it in a Bootstrap 5 modal overlay so the user never
- *   leaves the checkout page.
- *
  *   1. User clicks Pay.
- *   2. Server calls /v1/form → gets challengeUrl (jetframe.paycomet.com/…).
+ *   2. Server calls Paycomet /v1/form → gets challengeUrl.
  *   3. JS opens challengeUrl in a modal iframe.
  *   4. After card entry + 3DS, Paycomet redirects iframe to urlOk/urlKo.
  *   5. Our return controller serves breakout HTML → parent navigates to
  *      /payment/status.
  *
  * ── INSTANT CREDIT (methodId=33) ────────────────────────────────────────────
- *   challengeUrl is served from api.paycomet.com, which sets
- *   X-Frame-Options: SAMEORIGIN → browser blocks iframe embedding.
- *   We do a FULL-PAGE redirect instead.
+ *   Same iframe flow. The server patches the challengeUrl to the test
+ *   endpoint automatically when the provider is not in production mode
+ *   (avoids HTTP 500 from api.instantcredit.net on test tokens).
  *
  *   1. User clicks "Request financing".
- *   2. Server calls /v1/form → gets challengeUrl (api.paycomet.com/…).
- *   3. JS redirects the full page to challengeUrl.
- *   4. User fills IC form on Paycomet's page (DNI, IBAN, signature…).
- *   5. Paycomet redirects full page to urlOk/urlKo.
- *   6. Our return controller processes the transaction and redirects to
- *      /payment/status (the breakout HTML handles both iframe and full-page).
+ *   2. Server calls /v1/form → gets challengeUrl (test or production).
+ *   3. JS opens challengeUrl in a modal iframe.
+ *   4. User fills IC form (DNI, IBAN, cuotas, firma SEPA…).
+ *   5. Paycomet redirects iframe to urlOk (pending) or urlKo (rejected).
+ *   6. Breakout HTML → parent navigates to /payment/status.
  */
 
 import PaymentForm from '@payment/js/payment_form';
@@ -77,24 +73,9 @@ PaymentForm.include({
             return this._super(...arguments);   // fallback: Odoo default redirect
         }
 
-        const isInstantCredit = (
-            paymentMethodCode === 'instant_credit' ||
-            paymentMethodCode === 'credit'
-        );
-
-        if (isInstantCredit) {
-            // ── Instant Credit: full-page redirect ───────────────────────────
-            // api.paycomet.com blocks iframe embedding (X-Frame-Options: SAMEORIGIN).
-            // Navigate the entire page to the challengeUrl. After IC form
-            // completion, Paycomet redirects to our urlOk/urlKo (full page),
-            // and our return controller sends to /payment/status.
-            this._jetframeDismissOdooLoader();
-            window.location.href = challengeUrl;
-        } else {
-            // ── Card: modal iframe ────────────────────────────────────────────
-            // jetframe.paycomet.com allows cross-origin embedding.
-            this._jetframeOpenModal(challengeUrl);
-        }
+        // Both card and Instant Credit use the modal iframe.
+        // The server already patched the IC URL to the correct test/prod endpoint.
+        this._jetframeOpenModal(challengeUrl);
     },
 
     // =========================================================================

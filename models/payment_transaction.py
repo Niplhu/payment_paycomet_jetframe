@@ -296,9 +296,17 @@ class PaymentTransaction(models.Model):
         challenge_url = self._jetframe_extract_challenge_url(data)
 
         if challenge_url and error_code == 0:
+            # Instant Credit + modo test: sustituir endpoint de producción por test.
+            # El terminal de test de Paycomet devuelve la URL de producción de
+            # instantcredit.net, que retorna 500 con tokens de prueba.
+            if is_ic and self.provider_id.state != 'enabled':
+                challenge_url = challenge_url.replace(
+                    '/api/transaction/', '/api/test/transaction/', 1
+                )
+
             _logger.info(
-                "Paycomet JET: challengeUrl obtenida ref=%s url=%.60s…",
-                self.reference, challenge_url,
+                "Paycomet JET: challengeUrl ref=%s is_ic=%s url=%.80s",
+                self.reference, is_ic, challenge_url,
             )
             return challenge_url
 
@@ -502,6 +510,53 @@ class PaymentTransaction(models.Model):
             'Accept': 'application/json',
             'Content-Type': 'application/json',
         }
+
+    def _jetframe_ic_test_url(self, challenge_url):
+        """
+        Patch an Instant Credit challengeUrl to its test equivalent when the
+        payment provider is NOT in production mode.
+
+        Paycomet's test terminal returns the same instantcredit.net URL as
+        production. Loading the production URL with a test token results in
+        HTTP 500. The test endpoint is identical but has /test/ inserted after
+        /api/ in the path:
+
+          Production: https://api.instantcredit.net/api/transaction/{token}/…
+          Test:       https://api.instantcredit.net/api/test/transaction/{token}/…
+
+        We apply the patch only when provider.state != 'enabled' so production
+        traffic is never modified.
+        """
+        self.ensure_one()
+        if not challenge_url:
+            return challenge_url
+
+        is_production = self.provider_id.state == 'enabled'
+        if is_production:
+            return challenge_url
+
+        # Insert /test/ if the URL matches the known IC production pattern
+        IC_PROD = 'api.instantcredit.net/api/transaction/'
+        IC_TEST = 'api.instantcredit.net/api/test/transaction/'
+
+        if IC_PROD in challenge_url:
+            patched = challenge_url.replace(IC_PROD, IC_TEST, 1)
+            _logger.info(
+                "Paycomet JET IC: URL patched to test endpoint ref=%s\n  from: %s\n  to:   %s",
+                self.reference, challenge_url, patched,
+            )
+            return patched
+
+        # URL doesn't match the expected pattern — return as-is and log a warning
+        # so the developer can verify the correct test pattern with Paycomet.
+        _logger.warning(
+            "Paycomet JET IC: provider is in test mode but challengeUrl does not "
+            "contain the expected pattern '%s'.\n  URL: %s\n  "
+            "If your test IC endpoint has a different pattern, update "
+            "_jetframe_ic_test_url() accordingly.",
+            IC_PROD, challenge_url,
+        )
+        return challenge_url
 
     def _jetframe_form_url(self):
         """Return the full /v1/form endpoint URL from the provider configuration."""
