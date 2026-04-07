@@ -7,6 +7,44 @@ from odoo.http import request
 
 _logger = logging.getLogger(__name__)
 
+_BREAKOUT_HTML = """\
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>Procesando pago...</title>
+    <style>
+        body {{ font-family: system-ui, sans-serif; display: flex;
+               align-items: center; justify-content: center;
+               min-height: 100vh; margin: 0; background: #f8f9fa; }}
+        .msg {{ color: #6c757d; font-size: .9rem; text-align: center; }}
+        .spinner {{ width: 28px; height: 28px; border: 3px solid #dee2e6;
+                   border-top-color: #6c757d; border-radius: 50%;
+                   animation: spin .8s linear infinite; margin: 0 auto 12px; }}
+        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+    </style>
+</head>
+<body>
+    <div class="msg">
+        <div class="spinner"></div>
+        <p>Procesando, por favor espere&hellip;</p>
+    </div>
+    <script>
+        var dest = '/payment/status';
+        try {{
+            if (window !== window.top) {{
+                window.top.location.href = dest;
+            }} else {{
+                window.location.href = dest;
+            }}
+        }} catch (e) {{
+            window.location.href = dest;
+        }}
+    </script>
+</body>
+</html>"""
+
 
 class PaycometJetController(http.Controller):
 
@@ -26,7 +64,10 @@ class PaycometJetController(http.Controller):
                 data.get('reference'),
                 data.get('order'),
             )
-        return request.redirect('/payment/status')
+        return request.make_response(
+            _BREAKOUT_HTML,
+            headers=[('Content-Type', 'text/html; charset=utf-8')],
+        )
 
 
 class PaycometJetPostProcessing(PaymentPostProcessing):

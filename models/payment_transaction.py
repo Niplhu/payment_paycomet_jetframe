@@ -21,30 +21,6 @@ PAYCOMET_ERRORS_URL = "https://rest.paycomet.com/v1/errors"
 PAYCOMET_OPERATION_INFO_URL = "https://rest.paycomet.com/v1/payments/{order}/info"
 PAYCOMET_METHOD_CARD = 1
 PAYCOMET_METHOD_INSTANT_CREDIT = 33
-PAYCOMET_ERROR_MESSAGES = {
-    1129: ("El pago fue cancelado por el usuario.", True),
-    1115: ("La operacion fue cancelada.", True),
-    1003: ("Datos de tarjeta incorrectos. Comprueba el numero, la fecha y el CVV.", False),
-    1004: ("Tarjeta no valida o caducada.", False),
-    1005: ("Fondos insuficientes.", False),
-    1006: ("Tarjeta bloqueada o restringida.", False),
-    1010: ("Operacion denegada por el emisor de la tarjeta.", False),
-    1015: ("Numero de intentos excedido. Intentelo mas tarde.", False),
-    1110: ("El importe minimo para esta operacion no ha sido alcanzado.", False),
-    1111: ("El importe supera el maximo permitido.", False),
-    1112: ("Importe no valido.", False),
-    1123: ("Autenticacion 3D Secure fallida.", False),
-    1124: ("Tiempo de espera agotado durante la autenticacion.", False),
-    1125: ("El banco emisor no soporta 3D Secure.", False),
-    1000: ("Error interno de Paycomet. Intentelo de nuevo.", False),
-    1001: ("Terminal no encontrado o inactivo.", False),
-    1002: ("Credenciales de terminal incorrectas.", False),
-    1050: ("Pedido duplicado. Ya existe una transaccion con esta referencia.", False),
-    1053: ("La orden ya fue procesada.", False),
-    9050: ("Solicitud de credito rechazada por el proveedor financiero.", False),
-    9051: ("Documentacion requerida para el credito no disponible.", False),
-    9055: ("Limite de credito superado.", False),
-}
 ISO_3166_NUMERIC_BY_ALPHA2 = {
     'DE': '276',
     'ES': '724',
@@ -203,16 +179,7 @@ class PaymentTransaction(models.Model):
 
         for candidate in candidates:
             try:
-                ip_obj = ipaddress.ip_address(candidate)
-                if (
-                    ip_obj.is_private
-                    or ip_obj.is_loopback
-                    or ip_obj.is_link_local
-                    or ip_obj.is_reserved
-                    or ip_obj.is_multicast
-                    or ip_obj.is_unspecified
-                ):
-                    continue
+                ipaddress.ip_address(candidate)
                 return candidate
             except ValueError:
                 continue
@@ -303,19 +270,6 @@ class PaymentTransaction(models.Model):
         except Exception:
             return None
         return data.get('errorDescription')
-
-    def _jetframe_resolve_error(self, error_code, terminal_id=None):
-        self.ensure_one()
-        try:
-            code = int(error_code)
-        except (TypeError, ValueError):
-            return None, False
-
-        message, is_cancel = PAYCOMET_ERROR_MESSAGES.get(code, (None, False))
-        if message:
-            return message, is_cancel
-
-        return self._jetframe_describe_error(code, terminal_id), False
 
     def _jetframe_get_operation_info(self, order_ref, terminal_id, attempts=3, delay_seconds=0.8):
         self.ensure_one()
@@ -499,13 +453,8 @@ class PaymentTransaction(models.Model):
             return challenge_url
 
         _logger.warning("Paycomet JET: respuesta no usable endpoint=%s ref=%s body=%s", endpoint, self.reference, data)
-        error_msg, is_cancel = self._jetframe_resolve_error(
-            data.get('errorCode'), terminal_id,
-        )
-        error_msg = data.get('errorDescription') or error_msg
+        error_msg = data.get('errorDescription') or self._jetframe_describe_error(error_code, terminal_id)
         if error_msg:
-            if is_cancel:
-                raise ValidationError(error_msg)
             raise ValidationError(_("Paycomet: %s") % error_msg)
         raise ValidationError(_("Paycomet no devolvio una URL valida para el formulario de pago."))
 
@@ -680,18 +629,11 @@ class PaymentTransaction(models.Model):
                     order_ref,
                 )
 
-            is_cancel = False
-            if error_code:
-                resolved_error, is_cancel = self._jetframe_resolve_error(
-                    error_code, provider.paycomet_terminal_id,
-                )
-                error_description = error_description or resolved_error
+            if not error_description and error_code:
+                error_description = self._jetframe_describe_error(error_code, provider.paycomet_terminal_id)
 
             if error_description:
-                if is_cancel:
-                    self._set_canceled(state_message=error_description)
-                else:
-                    self._set_error(_("Paycomet: %s") % error_description)
+                self._set_error(_("Paycomet: %s") % error_description)
             elif error_code:
                 self._set_error(_("Paycomet rechazó el pago (código %s).") % error_code)
             else:
