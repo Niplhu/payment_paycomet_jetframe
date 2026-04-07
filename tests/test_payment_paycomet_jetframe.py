@@ -10,6 +10,18 @@ from odoo.tools import mute_logger
 from odoo.addons.payment.tests.common import PaymentCommon
 
 
+class _FakeResponse:
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
 @tagged('post_install', '-at_install')
 class TestPaycometJetframe(PaymentCommon):
 
@@ -34,14 +46,10 @@ class TestPaycometJetframe(PaymentCommon):
 
         captured_payload = {}
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}
-
         def _fake_post(*args, **kwargs):
             captured_payload['url'] = args[0] if args else None
             captured_payload['json'] = kwargs.get('json')
-            return FakeResponse()
+            return _FakeResponse({'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'})
 
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
@@ -63,13 +71,10 @@ class TestPaycometJetframe(PaymentCommon):
 
         captured_payload = {}
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}
-
         def _fake_post(*args, **kwargs):
+            captured_payload['url'] = args[0] if args else None
             captured_payload['json'] = kwargs.get('json')
-            return FakeResponse()
+            return _FakeResponse({'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'})
 
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
@@ -90,8 +95,9 @@ class TestPaycometJetframe(PaymentCommon):
         )
         self.assertEqual(captured_payload['json']['payment']['terminal'], 1)
         self.assertEqual(captured_payload['json']['payment']['productDescription'], tx.reference)
-        self.assertEqual(captured_payload['json']['language'], 'es')
         self.assertEqual(captured_payload['url'], 'https://rest.paycomet.com/v1/payments')
+        self.assertNotIn('language', captured_payload['json'])
+        self.assertNotIn('operationType', captured_payload['json'])
         self.assertEqual(
             tx.paycomet_order,
             '123456789012',
@@ -106,13 +112,9 @@ class TestPaycometJetframe(PaymentCommon):
     def test_rendering_values_raise_on_form_error(self):
         tx = self._create_transaction(flow='redirect')
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 1145}
-
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
-            return_value=FakeResponse(),
+            return_value=_FakeResponse({'errorCode': 1145}),
         ):
             with self.assertRaises(ValidationError):
                 tx._get_specific_rendering_values({})
@@ -120,13 +122,9 @@ class TestPaycometJetframe(PaymentCommon):
     def test_rendering_values_use_challenge_url_when_available(self):
         tx = self._create_transaction(flow='redirect')
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}
-
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
-            return_value=FakeResponse(),
+            return_value=_FakeResponse({'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}),
         ):
             values = tx._get_specific_rendering_values({})
 
@@ -135,13 +133,9 @@ class TestPaycometJetframe(PaymentCommon):
     def test_rendering_values_use_challenge_url_without_error_code(self):
         tx = self._create_transaction(flow='redirect')
 
-        class FakeResponse:
-            def json(self):
-                return {'challengeURL': 'https://example.com/challenge'}
-
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
-            return_value=FakeResponse(),
+            return_value=_FakeResponse({'challengeURL': 'https://example.com/challenge'}),
         ):
             values = tx._get_specific_rendering_values({})
 

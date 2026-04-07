@@ -20,7 +20,8 @@
  *   (avoids HTTP 500 from api.instantcredit.net on test tokens).
  *
  *   1. User clicks "Request financing".
- *   2. Server calls /v1/form → gets challengeUrl (test or production).
+ *   2. Server calls /v1/payments with methodId=33 → gets challengeUrl
+ *      (test or production).
  *   3. JS opens challengeUrl in a modal iframe.
  *   4. User fills IC form (DNI, IBAN, cuotas, firma SEPA…).
  *   5. Paycomet redirects iframe to urlOk (pending) or urlKo (rejected).

@@ -19,6 +19,7 @@ _logger = logging.getLogger(__name__)
 # Paycomet REST API endpoint paths (base URL is configured on payment.provider)
 # ---------------------------------------------------------------------------
 PAYCOMET_FORM_PATH            = "/v1/form"
+PAYCOMET_PAYMENTS_PATH        = "/v1/payments"
 PAYCOMET_OPERATION_INFO_PATH  = "/v1/payments/{order}/info"
 
 # Fallback base URL used only when the provider record is not available
@@ -168,14 +169,16 @@ class PaymentTransaction(models.Model):
 
     def _jetframe_get_challenge_url(self, processing_values=None):
         """
-        Build the Paycomet /v1/form payload and return the challengeUrl.
+        Build the Paycomet request and return the challengeUrl.
 
         Card:
           - methods: [1], secure: 1 (forces 3DS)
+          - endpoint: /v1/form (hosted method selector/form)
           - urlOk → DONE state
 
         Instant Credit:
-          - methods: [33], secure: 0 (IC has its own scoring auth, not 3DS)
+          - methodId: 33, secure: 0 (IC has its own scoring auth, not 3DS)
+          - endpoint: /v1/payments (direct payment by selected APM)
           - order ref MUST start with a digit
           - billAddrCountry is MANDATORY and must be 724 (Spain)
           - urlOk → PENDING state (financing decision is async)
@@ -228,14 +231,11 @@ class PaymentTransaction(models.Model):
         )
         url_notify = "{base}/payment/jetframe/notify".format(base=base_url)
 
-        # ── /v1/form payload ──────────────────────────────────────────────────
         payment_payload = {
             'terminal': terminal_id,
             'order': order_ref,
             'amount': amount_cents,
             'currency': self.currency_id.name,
-            'methods': [method_id],
-            'excludedMethods': [],
             # 3DS: ON for card, OFF for Instant Credit (IC uses own scoring/auth)
             'secure': 0 if is_ic else 1,
             'userInteraction': 1,
@@ -248,27 +248,37 @@ class PaymentTransaction(models.Model):
         if client_ip:
             payment_payload['originalIp'] = client_ip
 
-        payload = {
-            'operationType': 1,   # 1 = Authorization + Capture
-            'language': 'es',
-            'payment': payment_payload,
-        }
+        if is_ic:
+            payment_payload['methodId'] = method_id
+            endpoint = self._jetframe_payments_url()
+            payload = {'payment': payment_payload}
+            log_label = '/v1/payments'
+        else:
+            payment_payload.update({
+                'methods': [method_id],
+                'excludedMethods': [],
+            })
+            endpoint = self._jetframe_form_url()
+            payload = {
+                'operationType': 1,   # 1 = Authorization + Capture
+                'language': 'es',
+                'payment': payment_payload,
+            }
+            log_label = '/v1/form'
 
         _logger.info(
-            "Paycomet JET /v1/form: ref=%s order=%s amount=%s method=%s(%s) is_ic=%s",
-            self.reference, order_ref, amount_cents,
+            "Paycomet JET %s: ref=%s order=%s amount=%s method=%s(%s) is_ic=%s",
+            log_label, self.reference, order_ref, amount_cents,
             method_id, 'instant_credit' if is_ic else 'card', is_ic,
         )
-
-        form_endpoint = self._jetframe_form_url()
         _logger.info(
-            "Paycomet JET /v1/form endpoint: %s (base=%s)",
-            form_endpoint, self.provider_id.paycomet_api_url,
+            "Paycomet JET %s endpoint: %s (base=%s)",
+            log_label, endpoint, self.provider_id.paycomet_api_url,
         )
 
         try:
             resp = req_lib.post(
-                form_endpoint,
+                endpoint,
                 json=payload,
                 headers=self._jetframe_api_headers(),
                 timeout=30,
@@ -277,7 +287,7 @@ class PaymentTransaction(models.Model):
             data = resp.json()
         except req_lib.exceptions.RequestException as exc:
             _logger.error(
-                "Paycomet JET: red error en /v1/form ref=%s: %s", self.reference, exc,
+                "Paycomet JET: red error en %s ref=%s: %s", log_label, self.reference, exc,
             )
             raise ValidationError(
                 _("Error de comunicación con Paycomet. Inténtalo de nuevo.")
@@ -285,8 +295,8 @@ class PaymentTransaction(models.Model):
 
         if not isinstance(data, dict):
             _logger.error(
-                "Paycomet JET: respuesta /v1/form no es JSON ref=%s body=%s",
-                self.reference, data,
+                "Paycomet JET: respuesta %s no es JSON ref=%s body=%s",
+                log_label, self.reference, data,
             )
             raise ValidationError(
                 _("Paycomet devolvió una respuesta inválida. Contacta con soporte.")
@@ -296,13 +306,8 @@ class PaymentTransaction(models.Model):
         challenge_url = self._jetframe_extract_challenge_url(data)
 
         if challenge_url and error_code == 0:
-            # Instant Credit + modo test: sustituir endpoint de producción por test.
-            # El terminal de test de Paycomet devuelve la URL de producción de
-            # instantcredit.net, que retorna 500 con tokens de prueba.
-            if is_ic and self.provider_id.state != 'enabled':
-                challenge_url = challenge_url.replace(
-                    '/api/transaction/', '/api/test/transaction/', 1
-                )
+            if is_ic:
+                challenge_url = self._jetframe_ic_test_url(challenge_url)
 
             _logger.info(
                 "Paycomet JET: challengeUrl ref=%s is_ic=%s url=%.80s",
@@ -313,7 +318,8 @@ class PaymentTransaction(models.Model):
         error_msg, _ = _resolve_error(error_code)
         final_msg = data.get('errorDescription') or error_msg or _("Error desconocido de Paycomet.")
         _logger.error(
-            "Paycomet JET: /v1/form error ref=%s code=%s desc=%s body=%s",
+            "Paycomet JET: %s error ref=%s code=%s desc=%s body=%s",
+            log_label,
             self.reference, error_code, final_msg, data,
         )
         raise ValidationError(_("Paycomet: %s") % final_msg)
@@ -566,6 +572,15 @@ class PaymentTransaction(models.Model):
             or PAYCOMET_DEFAULT_BASE_URL
         ).rstrip('/')
         return base + PAYCOMET_FORM_PATH
+
+    def _jetframe_payments_url(self):
+        """Return the full /v1/payments endpoint URL from the provider configuration."""
+        self.ensure_one()
+        base = (
+            self.provider_id.paycomet_api_url
+            or PAYCOMET_DEFAULT_BASE_URL
+        ).rstrip('/')
+        return base + PAYCOMET_PAYMENTS_PATH
 
     def _jetframe_operation_info_url(self, order_ref):
         """Return the full /v1/payments/{order}/info endpoint URL."""
