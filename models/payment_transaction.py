@@ -16,10 +16,13 @@ from odoo.http import request
 _logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Paycomet REST API endpoints
+# Paycomet REST API endpoint paths (base URL is configured on payment.provider)
 # ---------------------------------------------------------------------------
-PAYCOMET_FORM_URL = "https://rest.paycomet.com/v1/form"
-PAYCOMET_OPERATION_INFO_URL = "https://rest.paycomet.com/v1/payments/{order}/info"
+PAYCOMET_FORM_PATH            = "/v1/form"
+PAYCOMET_OPERATION_INFO_PATH  = "/v1/payments/{order}/info"
+
+# Fallback base URL used only when the provider record is not available
+PAYCOMET_DEFAULT_BASE_URL = "https://rest.paycomet.com"
 
 # ---------------------------------------------------------------------------
 # Paycomet method IDs (sent in `methods` array of /v1/form payload)
@@ -257,9 +260,15 @@ class PaymentTransaction(models.Model):
             method_id, 'instant_credit' if is_ic else 'card', is_ic,
         )
 
+        form_endpoint = self._jetframe_form_url()
+        _logger.info(
+            "Paycomet JET /v1/form endpoint: %s (base=%s)",
+            form_endpoint, self.provider_id.paycomet_api_url,
+        )
+
         try:
             resp = req_lib.post(
-                PAYCOMET_FORM_URL,
+                form_endpoint,
                 json=payload,
                 headers=self._jetframe_api_headers(),
                 timeout=30,
@@ -494,6 +503,24 @@ class PaymentTransaction(models.Model):
             'Content-Type': 'application/json',
         }
 
+    def _jetframe_form_url(self):
+        """Return the full /v1/form endpoint URL from the provider configuration."""
+        self.ensure_one()
+        base = (
+            self.provider_id.paycomet_api_url
+            or PAYCOMET_DEFAULT_BASE_URL
+        ).rstrip('/')
+        return base + PAYCOMET_FORM_PATH
+
+    def _jetframe_operation_info_url(self, order_ref):
+        """Return the full /v1/payments/{order}/info endpoint URL."""
+        self.ensure_one()
+        base = (
+            self.provider_id.paycomet_api_url
+            or PAYCOMET_DEFAULT_BASE_URL
+        ).rstrip('/')
+        return base + PAYCOMET_OPERATION_INFO_PATH.format(order=order_ref)
+
     def _jetframe_extract_challenge_url(self, payload):
         """Find the challengeUrl in a Paycomet /v1/form response dict."""
         if not isinstance(payload, dict):
@@ -598,7 +625,7 @@ class PaymentTransaction(models.Model):
         if not terminal_id:
             return {}
 
-        endpoint = PAYCOMET_OPERATION_INFO_URL.format(order=order_ref)
+        endpoint = self._jetframe_operation_info_url(order_ref)
         payload = {'payment': {'terminal': int(terminal_id), 'order': order_ref}}
 
         for attempt in range(1, attempts + 1):

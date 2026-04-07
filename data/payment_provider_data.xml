@@ -6,11 +6,11 @@
         <field name="module_id" ref="base.module_payment_paycomet_jetframe"/>
         <field name="redirect_form_view_id" ref="redirect_form"/>
         <field name="inline_form_view_id" ref="inline_form"/>
-        <!-- Start disabled so the admin must configure credentials before enabling -->
+        <!-- URL base de la API — se puede cambiar en el formulario del proveedor -->
+        <field name="paycomet_api_url">https://rest.paycomet.com</field>
+        <!-- Disabled until the admin configures credentials -->
         <field name="state">disabled</field>
         <field name="is_published">False</field>
-        <!-- Terminal ID and API Key intentionally left empty.
-             Configure them in Accounting > Configuration > Payment Providers. -->
         <field name="payment_method_ids" eval="[
             Command.set([
                 ref('payment.payment_method_card'),
