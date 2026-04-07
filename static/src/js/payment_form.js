@@ -74,6 +74,13 @@ PaymentForm.include({
         // Remove any leftover modal/backdrop from a previous attempt
         this._jetframeCleanup();
 
+        // ── Dismiss Odoo's own loading overlay ────────────────────────────────
+        // Odoo blocks the UI while the server call is in progress (blockUI /
+        // o_loading). By the time _processRedirectFlow fires the server call is
+        // done, but the overlay may still be visible. Remove it so our modal
+        // is not obscured.
+        this._jetframeDismissOdooLoader();
+
         // ── Backdrop ─────────────────────────────────────────────────────────
         // Bootstrap 5 renders a separate .modal-backdrop element.
         // We create it manually since we're not using Bootstrap's JS Modal class.
@@ -187,16 +194,6 @@ PaymentForm.include({
     },
 
     // -------------------------------------------------------------------------
-    // Remove the modal + backdrop and restore body scroll
-    // -------------------------------------------------------------------------
-
-    _jetframeCleanup() {
-        document.getElementById(OVERLAY_ID)?.remove();
-        document.getElementById(BACKDROP_ID)?.remove();
-        document.body.classList.remove('modal-open');
-    },
-
-    // -------------------------------------------------------------------------
     // Re-enable the Pay button (compatible with Odoo 18 payment form API)
     // -------------------------------------------------------------------------
 
@@ -215,5 +212,62 @@ PaymentForm.include({
             btn.removeAttribute('disabled');
             btn.classList.remove('disabled');
         }
+    },
+
+    // -------------------------------------------------------------------------
+    // Dismiss Odoo's UI-blocking loading overlay.
+    //
+    // Odoo 18 uses several loading mechanisms depending on the context:
+    //   1. jQuery.blockUI — legacy widget layer ($.unblockUI)
+    //   2. .o_loading / .o_blockUI DOM elements — website/portal layer
+    //   3. .o_loader — some Odoo enterprise widgets
+    //
+    // We try all three so the overlay is gone before our modal appears.
+    // -------------------------------------------------------------------------
+
+    _jetframeDismissOdooLoader() {
+        // 1. jQuery blockUI (still present in Odoo 18 legacy stack)
+        try {
+            if (typeof window.$ !== 'undefined' && typeof window.$.unblockUI === 'function') {
+                window.$.unblockUI();
+            }
+        } catch (_) { /* ignore if jQuery / blockUI not available */ }
+
+        // 2. DOM-based loaders — hide them so they don't cover the modal.
+        //    We hide (not remove) so Odoo can show them again if needed.
+        const loaderSelectors = [
+            '.o_loading',         // main Odoo loading overlay
+            '.o_blockUI',         // blockUI DOM element
+            '.o_loader',          // enterprise loader
+            '#o_loading',
+        ];
+        for (const sel of loaderSelectors) {
+            document.querySelectorAll(sel).forEach((el) => {
+                el.dataset.jetframeHidden = '1';
+                el.style.display = 'none';
+            });
+        }
+    },
+
+    // -------------------------------------------------------------------------
+    // Restore any loaders we hid (called from _jetframeCleanup via close)
+    // -------------------------------------------------------------------------
+
+    _jetframeRestoreOdooLoaders() {
+        document.querySelectorAll('[data-jetframe-hidden="1"]').forEach((el) => {
+            el.style.removeProperty('display');
+            delete el.dataset.jetframeHidden;
+        });
+    },
+
+    // -------------------------------------------------------------------------
+    // Remove the modal + backdrop and restore body scroll
+    // -------------------------------------------------------------------------
+
+    _jetframeCleanup() {
+        document.getElementById(OVERLAY_ID)?.remove();
+        document.getElementById(BACKDROP_ID)?.remove();
+        document.body.classList.remove('modal-open');
+        this._jetframeRestoreOdooLoaders?.();
     },
 });

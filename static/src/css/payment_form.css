@@ -7,6 +7,18 @@
    ============================================================================= */
 
 /* ---------------------------------------------------------------------------
+   Z-index — must sit above Odoo's own loading overlay (blockUI / o_loading),
+   which uses z-index 9999. Bootstrap's default modal is only 1050, so we
+   override both the modal and the backdrop explicitly.
+   --------------------------------------------------------------------------- */
+#o_jetframe_overlay {
+    z-index: 10500 !important;
+}
+#o_jetframe_backdrop {
+    z-index: 10490 !important;
+}
+
+/* ---------------------------------------------------------------------------
    Dialog size — slightly wider than Bootstrap's default (500 px) to give the
    Paycomet hosted form enough breathing room without being too large.
    --------------------------------------------------------------------------- */
