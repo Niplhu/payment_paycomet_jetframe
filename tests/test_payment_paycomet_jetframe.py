@@ -113,6 +113,7 @@ class TestPaycometJetframe(PaymentCommon):
         self.assertEqual(captured_payload['url'], 'https://rest.paycomet.com/v1/payments')
         self.assertNotIn('language', captured_payload['json'])
         self.assertNotIn('operationType', captured_payload['json'])
+        self.assertNotIn('urlNotification', captured_payload['json']['payment'])
         self.assertEqual(
             tx.paycomet_order,
             '123456789012',
@@ -169,8 +170,13 @@ class TestPaycometJetframe(PaymentCommon):
         tx.payment_method_id = self.credit_payment_method
 
         response = _FakeHTTPErrorResponse({
-            'errorCode': 1110,
-            'errorDescription': 'El importe mínimo requerido no se ha alcanzado.',
+            'errorCode': 133,
+            'error': {
+                'message': 'The given data was invalid.',
+                'detail': [
+                    {'payment.urlNotification': ['The payment.urlNotification field is not allowed.']},
+                ],
+            },
         })
 
         with patch(
@@ -180,7 +186,7 @@ class TestPaycometJetframe(PaymentCommon):
             with self.assertRaises(ValidationError) as err:
                 tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
 
-        self.assertIn('importe mínimo', str(err.exception))
+        self.assertIn('urlNotification', str(err.exception))
 
     def test_rendering_values_use_challenge_url_when_available(self):
         tx = self._create_transaction(flow='redirect')

@@ -125,6 +125,41 @@ def _resolve_error(error_code):
     return msg, is_cancel
 
 
+def _extract_validation_message(payload):
+    """Extract a readable validation message from a PAYCOMET 422 payload."""
+    if not isinstance(payload, dict):
+        return None
+
+    error = payload.get('error')
+    if isinstance(error, dict):
+        details = error.get('detail')
+        if isinstance(details, list):
+            messages = []
+            for item in details:
+                if isinstance(item, str) and item.strip():
+                    messages.append(item.strip())
+                elif isinstance(item, dict):
+                    for value in item.values():
+                        if isinstance(value, list):
+                            messages.extend(
+                                str(v).strip() for v in value if str(v).strip()
+                            )
+                        elif value:
+                            messages.append(str(value).strip())
+            if messages:
+                return '; '.join(dict.fromkeys(messages))
+
+        message = error.get('message')
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+    description = payload.get('errorDescription')
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+
+    return None
+
+
 class PaymentTransaction(models.Model):
     _inherit = 'payment.transaction'
 
@@ -242,7 +277,6 @@ class PaymentTransaction(models.Model):
             'userInteraction': 1,
             'urlOk': url_ok,
             'urlKo': url_ko,
-            'urlNotification': url_notify,
             'productDescription': (self.reference or '')[:255],
             'merchantData': self._jetframe_merchant_data(is_instant_credit=is_ic),
         }
@@ -258,6 +292,7 @@ class PaymentTransaction(models.Model):
             payment_payload.update({
                 'methods': [method_id],
                 'excludedMethods': [],
+                'urlNotification': url_notify,
             })
             endpoint = self._jetframe_form_url()
             payload = {
@@ -300,7 +335,7 @@ class PaymentTransaction(models.Model):
                 api_error_code = _parse_error_code(response_data.get('errorCode'))
                 api_error_msg, is_cancel = _resolve_error(api_error_code)
                 final_msg = (
-                    response_data.get('errorDescription')
+                    _extract_validation_message(response_data)
                     or response_data.get('error', {}).get('message')
                     or api_error_msg
                 )
@@ -349,7 +384,7 @@ class PaymentTransaction(models.Model):
             return challenge_url
 
         error_msg, is_cancel = _resolve_error(error_code)
-        final_msg = data.get('errorDescription') or error_msg or _("Error desconocido de Paycomet.")
+        final_msg = _extract_validation_message(data) or error_msg or _("Error desconocido de Paycomet.")
         _logger.error(
             "Paycomet JET: %s error ref=%s code=%s desc=%s body=%s",
             log_label,
