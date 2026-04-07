@@ -3,34 +3,49 @@
 /**
  * Paycomet JET Frame — Odoo 18 payment form integration.
  *
- * Flow:
- * 1. User selects Paycomet and clicks Pay.
- * 2. We force Odoo to use the "redirect" flow so _get_specific_rendering_values
- *    is called server-side, which calls Paycomet /v1/form and gets a challengeUrl.
- * 3. Odoo renders the redirect_form template with that URL as the form's action.
- * 4. We intercept the redirect, extract the URL, and open it in a Bootstrap 5
- *    modal dialog (same style as native Odoo dialogs) — no full-page navigation.
- * 5. Paycomet shows the card form inside the modal iframe.
- * 6. After payment, Paycomet redirects to urlOk/urlKo inside the iframe.
- * 7. Our return controller serves a breakout page that navigates the parent
- *    window to /payment/status.
+ * TWO flows depending on the payment method:
+ *
+ * ── CARD (methodId=1) ───────────────────────────────────────────────────────
+ *   challengeUrl is served from jetframe.paycomet.com, which ALLOWS iframe
+ *   embedding. We open it in a Bootstrap 5 modal overlay so the user never
+ *   leaves the checkout page.
+ *
+ *   1. User clicks Pay.
+ *   2. Server calls /v1/form → gets challengeUrl (jetframe.paycomet.com/…).
+ *   3. JS opens challengeUrl in a modal iframe.
+ *   4. After card entry + 3DS, Paycomet redirects iframe to urlOk/urlKo.
+ *   5. Our return controller serves breakout HTML → parent navigates to
+ *      /payment/status.
+ *
+ * ── INSTANT CREDIT (methodId=33) ────────────────────────────────────────────
+ *   challengeUrl is served from api.paycomet.com, which sets
+ *   X-Frame-Options: SAMEORIGIN → browser blocks iframe embedding.
+ *   We do a FULL-PAGE redirect instead.
+ *
+ *   1. User clicks "Request financing".
+ *   2. Server calls /v1/form → gets challengeUrl (api.paycomet.com/…).
+ *   3. JS redirects the full page to challengeUrl.
+ *   4. User fills IC form on Paycomet's page (DNI, IBAN, signature…).
+ *   5. Paycomet redirects full page to urlOk/urlKo.
+ *   6. Our return controller processes the transaction and redirects to
+ *      /payment/status (the breakout HTML handles both iframe and full-page).
  */
 
 import PaymentForm from '@payment/js/payment_form';
 import { _t } from '@web/core/l10n/translation';
 
-// IDs used to find / clean up DOM elements
-const OVERLAY_ID   = 'o_jetframe_overlay';
-const BACKDROP_ID  = 'o_jetframe_backdrop';
-const IFRAME_ID    = 'o_jetframe_iframe';
-const LOADING_ID   = 'o_jetframe_loading';
+// DOM element IDs — used for the card modal only
+const OVERLAY_ID  = 'o_jetframe_overlay';
+const BACKDROP_ID = 'o_jetframe_backdrop';
+const IFRAME_ID   = 'o_jetframe_iframe';
+const LOADING_ID  = 'o_jetframe_loading';
 
 PaymentForm.include({
 
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // Force "redirect" flow so Odoo calls _get_specific_rendering_values on the
-    // server (where we call Paycomet /v1/form to get the challenge URL).
-    // -------------------------------------------------------------------------
+    // server, which calls Paycomet /v1/form and gets the challengeUrl.
+    // =========================================================================
 
     async _prepareInlineForm(providerId, providerCode, paymentOptionId, paymentMethodCode, flow) {
         if (providerCode !== 'jetframe') {
@@ -41,9 +56,9 @@ PaymentForm.include({
         }
     },
 
-    // -------------------------------------------------------------------------
-    // Intercept the Odoo redirect flow and open the challenge URL in a modal.
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // Route the payment to the correct flow based on the method.
+    // =========================================================================
 
     _processRedirectFlow(providerCode, paymentOptionId, paymentMethodCode, processingValues) {
         if (providerCode !== 'jetframe') {
@@ -51,7 +66,7 @@ PaymentForm.include({
         }
 
         // Extract the challengeUrl from the rendered redirect_form HTML.
-        // Odoo puts it as the <form action="..."> attribute.
+        // Odoo puts it as the <form action="…"> attribute.
         const tmp = document.createElement('div');
         tmp.innerHTML = processingValues['redirect_form_html'] || '';
         const form = tmp.querySelector('form');
@@ -59,34 +74,38 @@ PaymentForm.include({
 
         if (!challengeUrl) {
             console.error('[Paycomet JET] challengeUrl missing in redirect_form_html', processingValues);
-            return this._super(...arguments);   // fallback: full-page redirect
+            return this._super(...arguments);   // fallback: Odoo default redirect
         }
 
-        const isInstantCredit = (paymentMethodCode === 'instant_credit'
-                                 || paymentMethodCode === 'credit');
+        const isInstantCredit = (
+            paymentMethodCode === 'instant_credit' ||
+            paymentMethodCode === 'credit'
+        );
 
-        this._jetframeOpenModal(challengeUrl, isInstantCredit);
+        if (isInstantCredit) {
+            // ── Instant Credit: full-page redirect ───────────────────────────
+            // api.paycomet.com blocks iframe embedding (X-Frame-Options: SAMEORIGIN).
+            // Navigate the entire page to the challengeUrl. After IC form
+            // completion, Paycomet redirects to our urlOk/urlKo (full page),
+            // and our return controller sends to /payment/status.
+            this._jetframeDismissOdooLoader();
+            window.location.href = challengeUrl;
+        } else {
+            // ── Card: modal iframe ────────────────────────────────────────────
+            // jetframe.paycomet.com allows cross-origin embedding.
+            this._jetframeOpenModal(challengeUrl);
+        }
     },
 
-    // -------------------------------------------------------------------------
-    // Open a Bootstrap 5 modal (identical to Odoo native dialogs) with the
-    // Paycomet hosted form inside an iframe.
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // CARD FLOW: open challengeUrl in a Bootstrap 5 modal iframe overlay
+    // =========================================================================
 
-    _jetframeOpenModal(url, isInstantCredit = false) {
-        // Remove any leftover modal/backdrop from a previous attempt
+    _jetframeOpenModal(url) {
         this._jetframeCleanup();
-
-        // ── Dismiss Odoo's own loading overlay ────────────────────────────────
-        // Odoo blocks the UI while the server call is in progress (blockUI /
-        // o_loading). By the time _processRedirectFlow fires the server call is
-        // done, but the overlay may still be visible. Remove it so our modal
-        // is not obscured.
         this._jetframeDismissOdooLoader();
 
         // ── Backdrop ─────────────────────────────────────────────────────────
-        // Bootstrap 5 renders a separate .modal-backdrop element.
-        // We create it manually since we're not using Bootstrap's JS Modal class.
         const backdrop = document.createElement('div');
         backdrop.id = BACKDROP_ID;
         backdrop.className = 'modal-backdrop fade show';
@@ -102,45 +121,23 @@ PaymentForm.include({
         modal.setAttribute('aria-labelledby', 'o_jetframe_title');
         modal.setAttribute('tabindex', '-1');
 
-        // ── Content varies by payment method ─────────────────────────────────
-        const title = isInstantCredit
-            ? _t('Financiación instantánea — Paycomet')
-            : _t('Pago seguro — Paycomet');
-
-        const loadingText = isInstantCredit
-            ? _t('Cargando formulario de financiación…')
-            : _t('Cargando formulario de pago…');
-
-        // IC form includes personal data + IBAN + contract → needs more height
-        const modalSizeClass = isInstantCredit
-            ? 'o_jetframe_dialog o_jetframe_dialog_ic'
-            : 'o_jetframe_dialog';
-
-        // Icon: lock for card, credit/document for IC
-        const iconSvg = isInstantCredit
-            ? `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15"
-                    viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
-                    class="o_jetframe_lock_icon me-2" aria-hidden="true">
-                   <rect x="1" y="4" width="22" height="16" rx="2" ry="2"/>
-                   <line x1="1" y1="10" x2="23" y2="10"/>
-               </svg>`
-            : `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15"
-                    viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
-                    class="o_jetframe_lock_icon me-2" aria-hidden="true">
-                   <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                   <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-               </svg>`;
-
         modal.innerHTML = `
-            <div class="modal-dialog modal-dialog-centered ${modalSizeClass}">
+            <div class="modal-dialog modal-dialog-centered o_jetframe_dialog">
                 <div class="modal-content">
 
                     <div class="modal-header o_jetframe_header">
                         <h5 class="modal-title" id="o_jetframe_title">
-                            ${iconSvg}
-                            ${title}
+                            <svg xmlns="http://www.w3.org/2000/svg"
+                                 width="15" height="15" viewBox="0 0 24 24"
+                                 fill="none" stroke="currentColor"
+                                 stroke-width="2.5" stroke-linecap="round"
+                                 stroke-linejoin="round"
+                                 class="o_jetframe_lock_icon me-2"
+                                 aria-hidden="true">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                            </svg>
+                            ${_t('Pago seguro — Paycomet')}
                         </h5>
                         <button type="button"
                                 class="btn-close"
@@ -149,15 +146,15 @@ PaymentForm.include({
                         </button>
                     </div>
 
-                    <div class="modal-body p-0 o_jetframe_body${isInstantCredit ? ' o_jetframe_body_ic' : ''}">
+                    <div class="modal-body p-0 o_jetframe_body">
                         <div id="${LOADING_ID}" class="o_jetframe_loading">
                             <div class="o_jetframe_spinner"></div>
-                            <span class="text-muted">${loadingText}</span>
+                            <span class="text-muted">${_t('Cargando formulario de pago…')}</span>
                         </div>
                         <iframe
                             id="${IFRAME_ID}"
                             src="${url}"
-                            title="${_t('Formulario seguro de Paycomet')}"
+                            title="${_t('Formulario de pago seguro de Paycomet')}"
                             allow="payment"
                             class="o_jetframe_iframe d-none"
                             scrolling="yes"
@@ -169,11 +166,7 @@ PaymentForm.include({
         `;
 
         document.body.appendChild(modal);
-
-        // Prevent page scroll while modal is open (Bootstrap convention)
         document.body.classList.add('modal-open');
-
-        // Focus the modal for keyboard accessibility
         modal.focus();
 
         // ── Iframe lifecycle ──────────────────────────────────────────────────
@@ -201,14 +194,10 @@ PaymentForm.include({
 
         modal.querySelector('#o_jetframe_close').addEventListener('click', close);
 
-        // Click on backdrop (the semi-transparent area outside the dialog) closes
         modal.addEventListener('click', (e) => {
-            if (e.target === modal) {
-                close();
-            }
+            if (e.target === modal) close();
         });
 
-        // Escape key
         const onKeyDown = (e) => {
             if (e.key === 'Escape') {
                 close();
@@ -218,20 +207,19 @@ PaymentForm.include({
         document.addEventListener('keydown', onKeyDown);
     },
 
-    // -------------------------------------------------------------------------
-    // Re-enable the Pay button (compatible with Odoo 18 payment form API)
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // Helpers
+    // =========================================================================
 
     _jetframeEnablePayButton() {
         if (typeof this._enableButton === 'function') {
             this._enableButton();
             return;
         }
-        // Direct DOM fallback if method was renamed in this Odoo build
         const btn = this.el && (
-            this.el.querySelector('button[name="o_payment_submit_button"]')
-            || this.el.querySelector('.o_payment_submit_button')
-            || this.el.querySelector('button[type="submit"]')
+            this.el.querySelector('button[name="o_payment_submit_button"]') ||
+            this.el.querySelector('.o_payment_submit_button') ||
+            this.el.querySelector('button[type="submit"]')
         );
         if (btn) {
             btn.removeAttribute('disabled');
@@ -239,34 +227,14 @@ PaymentForm.include({
         }
     },
 
-    // -------------------------------------------------------------------------
-    // Dismiss Odoo's UI-blocking loading overlay.
-    //
-    // Odoo 18 uses several loading mechanisms depending on the context:
-    //   1. jQuery.blockUI — legacy widget layer ($.unblockUI)
-    //   2. .o_loading / .o_blockUI DOM elements — website/portal layer
-    //   3. .o_loader — some Odoo enterprise widgets
-    //
-    // We try all three so the overlay is gone before our modal appears.
-    // -------------------------------------------------------------------------
-
     _jetframeDismissOdooLoader() {
-        // 1. jQuery blockUI (still present in Odoo 18 legacy stack)
         try {
             if (typeof window.$ !== 'undefined' && typeof window.$.unblockUI === 'function') {
                 window.$.unblockUI();
             }
-        } catch (_) { /* ignore if jQuery / blockUI not available */ }
+        } catch (_) { /* ignore */ }
 
-        // 2. DOM-based loaders — hide them so they don't cover the modal.
-        //    We hide (not remove) so Odoo can show them again if needed.
-        const loaderSelectors = [
-            '.o_loading',         // main Odoo loading overlay
-            '.o_blockUI',         // blockUI DOM element
-            '.o_loader',          // enterprise loader
-            '#o_loading',
-        ];
-        for (const sel of loaderSelectors) {
+        for (const sel of ['.o_loading', '.o_blockUI', '.o_loader', '#o_loading']) {
             document.querySelectorAll(sel).forEach((el) => {
                 el.dataset.jetframeHidden = '1';
                 el.style.display = 'none';
@@ -274,20 +242,12 @@ PaymentForm.include({
         }
     },
 
-    // -------------------------------------------------------------------------
-    // Restore any loaders we hid (called from _jetframeCleanup via close)
-    // -------------------------------------------------------------------------
-
     _jetframeRestoreOdooLoaders() {
         document.querySelectorAll('[data-jetframe-hidden="1"]').forEach((el) => {
             el.style.removeProperty('display');
             delete el.dataset.jetframeHidden;
         });
     },
-
-    // -------------------------------------------------------------------------
-    // Remove the modal + backdrop and restore body scroll
-    // -------------------------------------------------------------------------
 
     _jetframeCleanup() {
         document.getElementById(OVERLAY_ID)?.remove();

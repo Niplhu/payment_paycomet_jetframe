@@ -122,23 +122,6 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Instant Credit dialog — taller than the card dialog because the IC form
-   includes personal data, IBAN, term selector and contract signature.
-   --------------------------------------------------------------------------- */
-.o_jetframe_dialog_ic {
-    max-width: 560px;
-}
-
-.o_jetframe_body_ic,
-.o_jetframe_body_ic .o_jetframe_loading {
-    min-height: 680px;
-}
-
-.o_jetframe_body_ic .o_jetframe_iframe {
-    min-height: 680px;
-}
-
-/* ---------------------------------------------------------------------------
    Inline info badge — card (shown below payment option before clicking Pay)
    --------------------------------------------------------------------------- */
 .o_jetframe_inline_info {
