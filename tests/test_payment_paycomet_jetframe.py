@@ -119,6 +119,36 @@ class TestPaycometJetframe(PaymentCommon):
             with self.assertRaises(ValidationError):
                 tx._get_specific_rendering_values({})
 
+    def test_instant_credit_rejects_amount_below_sandbox_minimum(self):
+        tx = self._create_transaction(flow='redirect', amount=153.67)
+        tx.payment_method_id = self.credit_payment_method
+
+        with self.assertRaises(ValidationError):
+            tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
+
+    @mute_logger('odoo.addons.payment_paycomet_jetframe.models.payment_transaction')
+    def test_instant_credit_merchant_data_uses_documented_phone_fields(self):
+        tx = self._create_transaction(flow='redirect', amount=200.0)
+        tx.payment_method_id = self.credit_payment_method
+        tx.partner_id.mobile = '+34 600 11 22 33'
+        tx.partner_id.phone = '+34 961 11 22 33'
+
+        captured_payload = {}
+
+        def _fake_post(*args, **kwargs):
+            captured_payload['json'] = kwargs.get('json')
+            return _FakeResponse({'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'})
+
+        with patch(
+            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
+            side_effect=_fake_post,
+        ):
+            tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
+
+        customer = captured_payload['json']['payment']['merchantData']['customer']
+        self.assertEqual(customer.get('mobilePhone'), '+34600112233')
+        self.assertNotIn('phone', customer)
+
     def test_rendering_values_use_challenge_url_when_available(self):
         tx = self._create_transaction(flow='redirect')
 

@@ -31,9 +31,11 @@ PAYCOMET_DEFAULT_BASE_URL = "https://rest.paycomet.com"
 PAYCOMET_METHOD_CARD = 1           # Standard credit/debit card (3DS)
 PAYCOMET_METHOD_INSTANT_CREDIT = 33  # Sabadell Instant Credit financing
 
-# Instant Credit: minimum amount in EUR required by Paycomet/Sabadell.
-# Transactions below this limit are rejected with errorCode 1110.
-IC_MINIMUM_AMOUNT_EUR = 100.0
+# Instant Credit sandbox docs indicate supported test amounts between
+# 180 EUR and 800 EUR. Below that range the generated challenge can end up
+# failing later inside instantcredit.net instead of returning a clean API error.
+IC_MINIMUM_AMOUNT_EUR = 180.0
+IC_SANDBOX_MAXIMUM_AMOUNT_EUR = 800.0
 
 # Instant Credit is only available for Spanish residents.
 # The billAddrCountry must be 724 (ISO 3166-1 numeric for Spain).
@@ -338,13 +340,27 @@ class PaymentTransaction(models.Model):
         """
         self.ensure_one()
 
-        # 1. Minimum amount (Paycomet IC minimum is ~100 EUR)
+        # 1. Amount range
         if self.currency_id.name == 'EUR' and self.amount < IC_MINIMUM_AMOUNT_EUR:
             raise ValidationError(_(
                 "La financiación Instant Credit requiere un importe mínimo de %(min)s €. "
                 "El importe actual es %(amount)s €."
             ) % {
                 'min': IC_MINIMUM_AMOUNT_EUR,
+                'amount': self.amount,
+            })
+
+        if (
+            self.provider_id.state != 'enabled'
+            and self.currency_id.name == 'EUR'
+            and self.amount > IC_SANDBOX_MAXIMUM_AMOUNT_EUR
+        ):
+            raise ValidationError(_(
+                "En el entorno de pruebas de Instant Credit el importe debe estar entre "
+                "%(min)s € y %(max)s €. El importe actual es %(amount)s €."
+            ) % {
+                'min': IC_MINIMUM_AMOUNT_EUR,
+                'max': IC_SANDBOX_MAXIMUM_AMOUNT_EUR,
                 'amount': self.amount,
             })
 
@@ -630,11 +646,14 @@ class PaymentTransaction(models.Model):
         }
         if partner.email:
             customer['email'] = partner.email.strip()
-        if is_instant_credit and partner.phone:
-            # Phone helps Sabadell's scoring — send when available
-            phone = re.sub(r'[^0-9+]', '', partner.phone)
-            if phone:
-                customer['phone'] = phone[:20]
+        if is_instant_credit:
+            # PAYCOMET documents homePhone/mobilePhone/workPhone.
+            mobile_phone = re.sub(r'[^0-9+]', '', partner.mobile or '')[:20]
+            home_phone = re.sub(r'[^0-9+]', '', partner.phone or '')[:20]
+            if mobile_phone:
+                customer['mobilePhone'] = mobile_phone
+            elif home_phone:
+                customer['homePhone'] = home_phone
 
         # Billing block
         billing = {}
@@ -656,6 +675,9 @@ class PaymentTransaction(models.Model):
             value = (getattr(partner, attr, None) or '').strip()
             if value:
                 billing[key] = value[:maxlen]
+
+        if partner.state_id and partner.state_id.name:
+            billing['billAddrState'] = partner.state_id.name.strip()[:50]
 
         result = {'customer': customer}
         if billing:
