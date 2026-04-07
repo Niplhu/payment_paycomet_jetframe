@@ -84,14 +84,6 @@
     z-index: 1;     /* sits on top of the iframe while loading */
 }
 
-.o_jetframe_notice {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 2;
-}
-
 .o_jetframe_spinner {
     width: 38px;
     height: 38px;

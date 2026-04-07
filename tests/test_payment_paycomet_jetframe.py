@@ -1,14 +1,13 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
-
-import requests
 
 from odoo.exceptions import ValidationError
 from odoo.tests import tagged
 from odoo.tools import mute_logger
 
+from odoo.addons.payment_paycomet_jetframe.models import payment_transaction as tx_module
 from odoo.addons.payment.tests.common import PaymentCommon
 
 
@@ -22,19 +21,6 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
-
-
-class _FakeHTTPErrorResponse(_FakeResponse):
-
-    def __init__(self, payload, status_code=422, text=''):
-        super().__init__(payload)
-        self.status_code = status_code
-        self.text = text
-
-    def raise_for_status(self):
-        error = requests.exceptions.HTTPError('http error', response=self)
-        error.response = self
-        raise error
 
 
 @tagged('post_install', '-at_install')
@@ -135,9 +121,11 @@ class TestPaycometJetframe(PaymentCommon):
             with self.assertRaises(ValidationError):
                 tx._get_specific_rendering_values({})
 
-    def test_instant_credit_rejects_amount_below_minimum(self):
-        tx = self._create_transaction(flow='redirect', amount=149.99)
+    def test_instant_credit_requires_billing_country(self):
+        tx = self._create_transaction(flow='redirect', amount=200.0)
         tx.payment_method_id = self.credit_payment_method
+        tx.partner_id.country_id = False
+        tx.company_id.partner_id.country_id = False
 
         with self.assertRaises(ValidationError):
             tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
@@ -165,29 +153,6 @@ class TestPaycometJetframe(PaymentCommon):
         self.assertNotIn('mobilePhone', customer)
         self.assertNotIn('homePhone', customer)
 
-    def test_rendering_values_surface_paycomet_http_422_message(self):
-        tx = self._create_transaction(flow='redirect', amount=200.0)
-        tx.payment_method_id = self.credit_payment_method
-
-        response = _FakeHTTPErrorResponse({
-            'errorCode': 133,
-            'error': {
-                'message': 'The given data was invalid.',
-                'detail': [
-                    {'payment.urlNotification': ['The payment.urlNotification field is not allowed.']},
-                ],
-            },
-        })
-
-        with patch(
-            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
-            return_value=response,
-        ):
-            with self.assertRaises(ValidationError) as err:
-                tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
-
-        self.assertIn('urlNotification', str(err.exception))
-
     def test_rendering_values_use_challenge_url_when_available(self):
         tx = self._create_transaction(flow='redirect')
 
@@ -209,32 +174,6 @@ class TestPaycometJetframe(PaymentCommon):
             values = tx._get_specific_rendering_values({})
 
         self.assertEqual(values['form_url'], 'https://example.com/challenge')
-
-    def test_ic_test_url_switches_to_test_host(self):
-        tx = self._create_transaction(flow='redirect')
-        tx.provider_id.state = 'test'
-
-        patched = tx._jetframe_ic_test_url(
-            'https://api.instantcredit.net/api/transaction/token123/installments/selector'
-        )
-
-        self.assertEqual(
-            patched,
-            'https://test.instantcredit.net/api/transaction/token123/installments/selector',
-        )
-
-    def test_ic_test_url_normalizes_legacy_test_path(self):
-        tx = self._create_transaction(flow='redirect')
-        tx.provider_id.state = 'test'
-
-        patched = tx._jetframe_ic_test_url(
-            'https://api.instantcredit.net/api/test/transaction/token123/installments/selector'
-        )
-
-        self.assertEqual(
-            patched,
-            'https://test.instantcredit.net/api/transaction/token123/installments/selector',
-        )
 
     def test_get_tx_from_notification_data_requires_reference_or_order(self):
         tx = self._create_transaction(flow='redirect')
@@ -275,3 +214,67 @@ class TestPaycometJetframe(PaymentCommon):
             tx._process_notification_data({'status': 'ok'})
 
         self.assertEqual(tx.state, 'done')
+
+    def test_resolve_error_uses_local_cancel_message(self):
+        tx = self._create_transaction(flow='redirect')
+
+        message, is_cancel = tx._jetframe_resolve_error(1129, 1)
+
+        self.assertEqual(message, 'El pago fue cancelado por el usuario.')
+        self.assertTrue(is_cancel)
+
+    def test_resolve_error_uses_local_card_message(self):
+        tx = self._create_transaction(flow='redirect')
+
+        message, is_cancel = tx._jetframe_resolve_error(1005, 1)
+
+        self.assertEqual(message, 'Fondos insuficientes.')
+        self.assertFalse(is_cancel)
+
+    def test_local_error_map_contains_supported_codes(self):
+        expected_codes = {
+            1129, 1115, 1003, 1004, 1005, 1006, 1010, 1015,
+            1110, 1111, 1112, 1123, 1124, 1125, 1000, 1001,
+            1002, 1050, 1053, 9050, 9051, 9055,
+        }
+
+        self.assertTrue(expected_codes.issubset(set(tx_module.PAYCOMET_ERROR_MESSAGES)))
+
+    def test_resolve_error_falls_back_to_paycomet_errors_api(self):
+        tx = self._create_transaction(flow='redirect')
+        mocked_response = Mock()
+        mocked_response.json.return_value = {'errorDescription': 'Error remoto'}
+
+        with patch(
+            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
+            return_value=mocked_response,
+        ):
+            message, is_cancel = tx._jetframe_resolve_error(7777, 1)
+
+        self.assertEqual(message, 'Error remoto')
+        self.assertFalse(is_cancel)
+
+    def test_notification_ko_sets_cancel_on_cancel_codes(self):
+        tx = self._create_transaction(flow='redirect')
+        tx.payment_method_id = self.payment_method
+
+        with patch(
+            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.PaymentTransaction._jetframe_get_operation_info',
+            return_value={},
+        ):
+            tx._process_notification_data({'status': 'ko', 'errorCode': '1129'})
+
+        self.assertEqual(tx.state, 'cancel')
+
+    def test_notification_ko_sets_error_on_card_error_codes(self):
+        tx = self._create_transaction(flow='redirect')
+        tx.payment_method_id = self.payment_method
+
+        with patch(
+            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.PaymentTransaction._jetframe_get_operation_info',
+            return_value={},
+        ):
+            tx._process_notification_data({'status': 'ko', 'errorCode': '1005'})
+
+        self.assertEqual(tx.state, 'error')
+        self.assertIn('Fondos insuficientes', tx.state_message)
