@@ -1,6 +1,6 @@
 {
     'name': 'Paycomet JET Payment Provider',
-    'version': '2.2.0',
+    'version': '2.3.0',
     'author': 'Foredu Solutions SL',
     'category': 'Accounting/Payment Providers',
     'summary': 'Paycomet Gateway – JET iFrame + Instant Credit (Sabadell)',
