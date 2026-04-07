@@ -15,14 +15,14 @@ _BREAKOUT_HTML = """\
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <title>Procesando pago...</title>
     <style>
-        body {{ font-family: system-ui, sans-serif; display: flex;
+        body { font-family: system-ui, sans-serif; display: flex;
                align-items: center; justify-content: center;
-               min-height: 100vh; margin: 0; background: #f8f9fa; }}
-        .msg {{ color: #6c757d; font-size: .9rem; text-align: center; }}
-        .spinner {{ width: 28px; height: 28px; border: 3px solid #dee2e6;
+               min-height: 100vh; margin: 0; background: #f8f9fa; }
+        .msg { color: #6c757d; font-size: .9rem; text-align: center; }
+        .spinner { width: 28px; height: 28px; border: 3px solid #dee2e6;
                    border-top-color: #6c757d; border-radius: 50%;
-                   animation: spin .8s linear infinite; margin: 0 auto 12px; }}
-        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+                   animation: spin .8s linear infinite; margin: 0 auto 12px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -32,15 +32,15 @@ _BREAKOUT_HTML = """\
     </div>
     <script>
         var dest = '/payment/status';
-        try {{
-            if (window !== window.top) {{
+        try {
+            if (window !== window.top) {
                 window.top.location.href = dest;
-            }} else {{
+            } else {
                 window.location.href = dest;
-            }}
-        }} catch (e) {{
+            }
+        } catch (e) {
             window.location.href = dest;
-        }}
+        }
     </script>
 </body>
 </html>"""
@@ -50,24 +50,48 @@ class PaycometJetController(http.Controller):
 
     @http.route('/payment/jetframe/return', type='http', auth='public', methods=['GET', 'POST'], csrf=False)
     def jetframe_return(self, **data):
+        notification = _normalise_paycomet_params(data)
         _logger.info(
-            "Paycomet return: reference=%s status=%s full_data=%s",
-            data.get('reference'),
-            data.get('status'),
-            data,
+            "Paycomet return: reference=%s order=%s status=%s full_data=%s",
+            notification.get('reference'),
+            notification.get('order'),
+            notification.get('status'),
+            notification,
         )
         try:
-            request.env['payment.transaction'].sudo()._handle_notification_data('jetframe', dict(data))
+            request.env['payment.transaction'].sudo()._handle_notification_data(
+                'jetframe', notification,
+            )
         except Exception:
             _logger.exception(
                 "Paycomet return processing failed: reference=%s order=%s",
-                data.get('reference'),
-                data.get('order'),
+                notification.get('reference'),
+                notification.get('order'),
             )
         return request.make_response(
             _BREAKOUT_HTML,
             headers=[('Content-Type', 'text/html; charset=utf-8')],
         )
+
+    @http.route('/payment/jetframe/notify', type='http', auth='public', methods=['POST'], csrf=False, save_session=False)
+    def jetframe_notify(self, **data):
+        notification = _normalise_paycomet_params(data)
+        _logger.info(
+            "Paycomet notify: order=%s response=%s error=%s",
+            notification.get('order'),
+            notification.get('Response') or notification.get('response'),
+            notification.get('errorCode'),
+        )
+        try:
+            request.env['payment.transaction'].sudo()._handle_notification_data(
+                'jetframe', notification,
+            )
+        except Exception:
+            _logger.exception(
+                "Paycomet notify processing failed: order=%s",
+                notification.get('order'),
+            )
+        return request.make_response('OK', headers=[('Content-Type', 'text/plain')])
 
 
 class PaycometJetPostProcessing(PaymentPostProcessing):
@@ -98,3 +122,31 @@ class PaycometJetPostProcessing(PaymentPostProcessing):
                 'state': monitored_tx.state,
                 'landing_route': monitored_tx.landing_route,
             }
+
+
+def _normalise_paycomet_params(data):
+    notification = dict(data)
+
+    if 'Order' in notification and 'order' not in notification:
+        notification['order'] = notification['Order']
+
+    if 'ErrorID' in notification and 'errorCode' not in notification:
+        notification['errorCode'] = notification['ErrorID']
+
+    if 'ErrorCode' in notification and 'errorCode' not in notification:
+        notification['errorCode'] = notification['ErrorCode']
+
+    if 'ErrorDescription' in notification and 'errorDescription' not in notification:
+        notification['errorDescription'] = notification['ErrorDescription']
+
+    if 'Amount' in notification and 'amount' not in notification:
+        notification['amount'] = notification['Amount']
+
+    if 'Currency' in notification and 'currency' not in notification:
+        notification['currency'] = notification['Currency']
+
+    if 'status' not in notification and 'Response' in notification:
+        response_val = (notification['Response'] or '').strip().upper()
+        notification['status'] = 'ok' if response_val == 'OK' else 'ko'
+
+    return notification

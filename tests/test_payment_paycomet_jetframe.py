@@ -1,13 +1,23 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from odoo.exceptions import ValidationError
 from odoo.tests import tagged
 from odoo.tools import mute_logger
 
+from odoo.addons.payment_paycomet_jetframe.models import payment_transaction as tx_module
 from odoo.addons.payment.tests.common import PaymentCommon
+
+
+class _FakeResponse:
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
 
 
 @tagged('post_install', '-at_install')
@@ -34,14 +44,10 @@ class TestPaycometJetframe(PaymentCommon):
 
         captured_payload = {}
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}
-
         def _fake_post(*args, **kwargs):
             captured_payload['url'] = args[0] if args else None
             captured_payload['json'] = kwargs.get('json')
-            return FakeResponse()
+            return _FakeResponse({'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'})
 
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
@@ -54,6 +60,7 @@ class TestPaycometJetframe(PaymentCommon):
             {1},
             "When card is selected, /v1/form should expose only card",
         )
+        self.assertIn('urlNotification', captured_payload['json']['payment'])
 
     @mute_logger('odoo.addons.payment_paycomet_jetframe.models.payment_transaction')
     def test_rendering_values_only_credit_methods_when_credit_selected(self):
@@ -63,13 +70,10 @@ class TestPaycometJetframe(PaymentCommon):
 
         captured_payload = {}
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}
-
         def _fake_post(*args, **kwargs):
+            captured_payload['url'] = args[0] if args else None
             captured_payload['json'] = kwargs.get('json')
-            return FakeResponse()
+            return _FakeResponse({'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'})
 
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
@@ -92,6 +96,7 @@ class TestPaycometJetframe(PaymentCommon):
         self.assertEqual(captured_payload['json']['payment']['productDescription'], tx.reference)
         self.assertEqual(captured_payload['json']['language'], 'es')
         self.assertEqual(captured_payload['url'], 'https://rest.paycomet.com/v1/payments')
+        self.assertNotIn('urlNotification', captured_payload['json']['payment'])
         self.assertEqual(
             tx.paycomet_order,
             '123456789012',
@@ -106,13 +111,9 @@ class TestPaycometJetframe(PaymentCommon):
     def test_rendering_values_raise_on_form_error(self):
         tx = self._create_transaction(flow='redirect')
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 1145}
-
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
-            return_value=FakeResponse(),
+            return_value=_FakeResponse({'errorCode': 1145}),
         ):
             with self.assertRaises(ValidationError):
                 tx._get_specific_rendering_values({})
@@ -120,13 +121,9 @@ class TestPaycometJetframe(PaymentCommon):
     def test_rendering_values_use_challenge_url_when_available(self):
         tx = self._create_transaction(flow='redirect')
 
-        class FakeResponse:
-            def json(self):
-                return {'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}
-
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
-            return_value=FakeResponse(),
+            return_value=_FakeResponse({'errorCode': 0, 'challengeUrl': 'https://example.com/challenge'}),
         ):
             values = tx._get_specific_rendering_values({})
 
@@ -135,13 +132,9 @@ class TestPaycometJetframe(PaymentCommon):
     def test_rendering_values_use_challenge_url_without_error_code(self):
         tx = self._create_transaction(flow='redirect')
 
-        class FakeResponse:
-            def json(self):
-                return {'challengeURL': 'https://example.com/challenge'}
-
         with patch(
             'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
-            return_value=FakeResponse(),
+            return_value=_FakeResponse({'challengeURL': 'https://example.com/challenge'}),
         ):
             values = tx._get_specific_rendering_values({})
 
@@ -186,3 +179,50 @@ class TestPaycometJetframe(PaymentCommon):
             tx._process_notification_data({'status': 'ok'})
 
         self.assertEqual(tx.state, 'done')
+
+    def test_local_error_map_contains_expected_codes(self):
+        expected_codes = {184, 142, 1327, 1337, 1338, 9050, 9051, 9055}
+        self.assertTrue(expected_codes.issubset(set(tx_module.PAYCOMET_ERROR_MESSAGES)))
+
+    def test_resolve_error_uses_local_mapping_before_remote_lookup(self):
+        tx = self._create_transaction(flow='redirect')
+        message, is_cancel = tx._jetframe_resolve_error(1327, 1)
+        self.assertEqual(message, 'Error en el proceso de autenticacion 3DS.')
+        self.assertFalse(is_cancel)
+
+    def test_resolve_error_falls_back_to_errors_api(self):
+        tx = self._create_transaction(flow='redirect')
+        mocked_response = Mock()
+        mocked_response.json.return_value = {'errorDescription': 'Error remoto'}
+
+        with patch(
+            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
+            return_value=mocked_response,
+        ):
+            message, is_cancel = tx._jetframe_resolve_error(7777, 1)
+
+        self.assertEqual(message, 'Error remoto')
+        self.assertFalse(is_cancel)
+
+    def test_client_ip_ignores_private_proxy_addresses(self):
+        tx = self._create_transaction(flow='redirect')
+        httprequest = Mock()
+        httprequest.headers = {
+            'X-Forwarded-For': '10.0.0.5, 192.168.1.10',
+            'X-Real-IP': '127.0.0.1',
+        }
+        httprequest.remote_addr = '172.16.0.2'
+
+        with patch('odoo.addons.payment_paycomet_jetframe.models.payment_transaction.request') as request_mock:
+            request_mock.httprequest = httprequest
+            self.assertFalse(tx._jetframe_get_client_ip())
+
+    def test_client_ip_keeps_public_forwarded_address(self):
+        tx = self._create_transaction(flow='redirect')
+        httprequest = Mock()
+        httprequest.headers = {'X-Forwarded-For': '88.12.34.56, 10.0.0.5'}
+        httprequest.remote_addr = '172.16.0.2'
+
+        with patch('odoo.addons.payment_paycomet_jetframe.models.payment_transaction.request') as request_mock:
+            request_mock.httprequest = httprequest
+            self.assertEqual(tx._jetframe_get_client_ip(), '88.12.34.56')

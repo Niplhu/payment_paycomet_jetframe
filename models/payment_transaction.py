@@ -21,6 +21,29 @@ PAYCOMET_ERRORS_URL = "https://rest.paycomet.com/v1/errors"
 PAYCOMET_OPERATION_INFO_URL = "https://rest.paycomet.com/v1/payments/{order}/info"
 PAYCOMET_METHOD_CARD = 1
 PAYCOMET_METHOD_INSTANT_CREDIT = 33
+PAYCOMET_ERROR_MESSAGES = {
+    184: ("El pago fue cancelado por el usuario durante la autenticacion.", True),
+    142: ("La operacion fue cancelada.", True),
+    1003: ("Firma no valida. Revisa la configuracion del terminal.", False),
+    1004: ("Acceso no permitido.", False),
+    1005: ("Formato de tarjeta no valido.", False),
+    1006: ("Error en el campo CVV.", False),
+    1010: ("No se pudo enviar la operacion. Intentalo mas tarde.", False),
+    1015: ("No se ha encontrado el recurso HTTP solicitado.", False),
+    1110: ("Firma no valida en la peticion.", False),
+    1111: ("El importe supera el maximo permitido.", False),
+    1112: ("Importe no valido.", False),
+    1123: ("Firma no valida. Revisa la configuracion del terminal.", False),
+    1124: ("Operacion no disponible con el usuario especificado.", False),
+    1125: ("Operacion no valida con una moneda distinta de la fijada en el producto.", False),
+    1129: ("Cantidad no valida.", False),
+    1327: ("Error en el proceso de autenticacion 3DS.", False),
+    1337: ("La ruta de notificacion no esta configurada.", False),
+    1338: ("La ruta de notificacion no responde correctamente.", False),
+    9050: ("Solicitud de credito rechazada por el proveedor financiero.", False),
+    9051: ("Documentacion requerida para el credito no disponible.", False),
+    9055: ("Limite de credito superado.", False),
+}
 ISO_3166_NUMERIC_BY_ALPHA2 = {
     'DE': '276',
     'ES': '724',
@@ -61,6 +84,19 @@ class PaymentTransaction(models.Model):
             'form_url': form_url,
         })
         return values
+
+    def _jetframe_resolve_error(self, error_code, terminal_id=None):
+        self.ensure_one()
+        try:
+            code = int(error_code)
+        except (TypeError, ValueError):
+            return None, False
+
+        message, is_cancel = PAYCOMET_ERROR_MESSAGES.get(code, (None, False))
+        if message:
+            return message, is_cancel
+
+        return self._jetframe_describe_error(code, terminal_id), False
 
     # ---------------------------------------------------------
     # Helpers
@@ -179,7 +215,16 @@ class PaymentTransaction(models.Model):
 
         for candidate in candidates:
             try:
-                ipaddress.ip_address(candidate)
+                ip_obj = ipaddress.ip_address(candidate)
+                if (
+                    ip_obj.is_private
+                    or ip_obj.is_loopback
+                    or ip_obj.is_link_local
+                    or ip_obj.is_reserved
+                    or ip_obj.is_multicast
+                    or ip_obj.is_unspecified
+                ):
+                    continue
                 return candidate
             except ValueError:
                 continue
@@ -368,6 +413,7 @@ class PaymentTransaction(models.Model):
 
         url_ok = f"{base_url}/payment/jetframe/return?{urlencode({'reference': self.reference, 'order': order_ref, 'status': 'ok'})}"
         url_ko = f"{base_url}/payment/jetframe/return?{urlencode({'reference': self.reference, 'order': order_ref, 'status': 'ko'})}"
+        url_notify = f"{base_url}/payment/jetframe/notify"
 
         methods = self._jetframe_get_form_methods(processing_values=processing_values)
         payment_payload = {
@@ -395,6 +441,7 @@ class PaymentTransaction(models.Model):
             payment_payload.update({
                 'methods': methods,
                 'excludedMethods': [],
+                'urlNotification': url_notify,
             })
             endpoint = PAYCOMET_FORM_URL
             payload = {
@@ -453,8 +500,11 @@ class PaymentTransaction(models.Model):
             return challenge_url
 
         _logger.warning("Paycomet JET: respuesta no usable endpoint=%s ref=%s body=%s", endpoint, self.reference, data)
-        error_msg = data.get('errorDescription') or self._jetframe_describe_error(error_code, terminal_id)
+        error_msg, is_cancel = self._jetframe_resolve_error(error_code, terminal_id)
+        error_msg = data.get('errorDescription') or error_msg
         if error_msg:
+            if is_cancel:
+                raise ValidationError(error_msg)
             raise ValidationError(_("Paycomet: %s") % error_msg)
         raise ValidationError(_("Paycomet no devolvio una URL valida para el formulario de pago."))
 
@@ -629,11 +679,18 @@ class PaymentTransaction(models.Model):
                     order_ref,
                 )
 
-            if not error_description and error_code:
-                error_description = self._jetframe_describe_error(error_code, provider.paycomet_terminal_id)
+            is_cancel = False
+            if error_code:
+                error_description_resolved, is_cancel = self._jetframe_resolve_error(
+                    error_code, provider.paycomet_terminal_id,
+                )
+                error_description = error_description or error_description_resolved
 
             if error_description:
-                self._set_error(_("Paycomet: %s") % error_description)
+                if is_cancel:
+                    self._set_canceled(state_message=error_description)
+                else:
+                    self._set_error(_("Paycomet: %s") % error_description)
             elif error_code:
                 self._set_error(_("Paycomet rechazó el pago (código %s).") % error_code)
             else:

@@ -43,25 +43,26 @@ PaymentForm.include({
             return this._super(...arguments);
         }
 
-        const challengeUrl = this._jetframeExtractChallengeUrl(processingValues);
-        if (!challengeUrl) {
+        const redirectForm = this._jetframeExtractRedirectForm(processingValues);
+        if (!redirectForm) {
             return this._super(...arguments);
         }
 
-        this._jetframeOpenModal(challengeUrl);
+        this._jetframeOpenModal(redirectForm);
     },
 
     _jetframeShouldUseModal(paymentMethodCode) {
         return paymentMethodCode !== 'instant_credit';
     },
 
-    _jetframeExtractChallengeUrl(processingValues) {
+    _jetframeExtractRedirectForm(processingValues) {
         const tmp = document.createElement('div');
         tmp.innerHTML = processingValues.redirect_form_html || '';
-        return tmp.querySelector('form')?.getAttribute('action') || null;
+        const form = tmp.querySelector('form');
+        return form ? form.cloneNode(true) : null;
     },
 
-    _jetframeOpenModal(url) {
+    _jetframeOpenModal(redirectForm) {
         this._jetframeCleanup();
         this._jetframeDismissOdooLoader();
 
@@ -110,7 +111,7 @@ PaymentForm.include({
                         </div>
                         <iframe
                             id="${IFRAME_ID}"
-                            src="${url}"
+                            name="${IFRAME_ID}"
                             title="${_t('Formulario de pago seguro de Paycomet')}"
                             allow="payment"
                             class="o_jetframe_iframe d-none"
@@ -127,11 +128,25 @@ PaymentForm.include({
 
         const iframe = modal.querySelector(`#${IFRAME_ID}`);
         const loading = modal.querySelector(`#${LOADING_ID}`);
+        const form = redirectForm;
 
-        iframe.addEventListener('load', () => {
+        form.setAttribute('target', IFRAME_ID);
+        form.classList.add('d-none');
+        modal.appendChild(form);
+
+        const onIframeLoad = () => {
+            try {
+                if (iframe.contentWindow?.location?.href === 'about:blank') {
+                    return;
+                }
+            } catch (_) {
+                // Cross-origin access means the remote page is already loaded.
+            }
             loading.classList.add('d-none');
             iframe.classList.remove('d-none');
-        }, { once: true });
+            iframe.removeEventListener('load', onIframeLoad);
+        };
+        iframe.addEventListener('load', onIframeLoad);
 
         iframe.addEventListener('error', () => {
             loading.innerHTML = `
@@ -145,6 +160,14 @@ PaymentForm.include({
             this._jetframeCleanup();
             this._jetframeEnablePayButton();
         };
+
+        try {
+            form.submit();
+        } catch (_) {
+            close();
+            window.location.href = form.getAttribute('action') || window.location.href;
+            return;
+        }
 
         modal.querySelector('#o_jetframe_close').addEventListener('click', close);
         modal.addEventListener('click', (ev) => {
