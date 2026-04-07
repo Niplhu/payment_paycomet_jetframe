@@ -4,7 +4,7 @@
  * Paycomet JET Frame — Odoo 18 payment form integration.
  *
  * Card opens its challengeUrl in a Bootstrap 5 modal iframe overlay.
- * Instant Credit redirects the browser to the challengeUrl because
+ * Instant Credit uses Odoo's standard top-level redirect flow because
  * instantcredit.net rejects being embedded in an iframe.
  *
  * ── CARD (methodId=1) ───────────────────────────────────────────────────────
@@ -23,7 +23,7 @@
  *   1. User clicks "Request financing".
  *   2. Server calls /v1/payments with methodId=33 → gets challengeUrl
  *      (test or production).
- *   3. JS redirects the browser to challengeUrl.
+ *   3. JS submits Odoo's redirect form with target=_top.
  *   4. User fills IC form (DNI, IBAN, cuotas, firma SEPA…).
  *   5. Paycomet redirects iframe to urlOk (pending) or urlKo (rejected).
  *   6. Breakout HTML → parent navigates to /payment/status.
@@ -76,8 +76,7 @@ PaymentForm.include({
         }
 
         if (paymentMethodCode === 'instant_credit') {
-            window.location.assign(challengeUrl);
-            return;
+            return this._super(...arguments);
         }
 
         this._jetframeOpenModal(challengeUrl);
