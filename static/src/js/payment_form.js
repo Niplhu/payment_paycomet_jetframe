@@ -3,9 +3,10 @@
 /**
  * Paycomet JET Frame — Odoo 18 payment form integration.
  *
- * Card opens its challengeUrl in a Bootstrap 5 modal iframe overlay.
- * Instant Credit uses Odoo's standard top-level redirect flow because
- * instantcredit.net rejects being embedded in an iframe.
+ * Card and Instant Credit open their challengeUrl in a Bootstrap 5 modal
+ * iframe overlay. When Paycomet/Instant Credit return to our urlOk/urlKo,
+ * the server responds with breakout HTML that navigates the top window to
+ * /payment/status.
  *
  * ── CARD (methodId=1) ───────────────────────────────────────────────────────
  *   1. User clicks Pay.
@@ -16,16 +17,12 @@
  *      /payment/status.
  *
  * ── INSTANT CREDIT (methodId=33) ────────────────────────────────────────────
- *   Full-page redirect flow. The server patches the challengeUrl to the test
- *   endpoint automatically when the provider is not in production mode
- *   (avoids HTTP 500 from api.instantcredit.net on test tokens).
- *
  *   1. User clicks "Request financing".
- *   2. Server calls /v1/payments with methodId=33 → gets challengeUrl
- *      (test or production).
- *   3. JS submits Odoo's redirect form with target=_top.
+ *   2. Server calls /v1/payments with methodId=33 → gets challengeUrl.
+ *   3. JS opens the financing URL inside the same modal iframe used for card.
  *   4. User fills IC form (DNI, IBAN, cuotas, firma SEPA…).
- *   5. Paycomet redirects iframe to urlOk (pending) or urlKo (rejected).
+ *   5. Paycomet / Instant Credit redirect iframe to urlOk/urlKo when they
+ *      return control to the merchant.
  *   6. Breakout HTML → parent navigates to /payment/status.
  */
 
@@ -73,10 +70,6 @@ PaymentForm.include({
         if (!challengeUrl) {
             console.error('[Paycomet JET] challengeUrl missing in redirect_form_html', processingValues);
             return this._super(...arguments);   // fallback: Odoo default redirect
-        }
-
-        if (paymentMethodCode === 'instant_credit') {
-            return this._super(...arguments);
         }
 
         this._jetframeOpenModal(challengeUrl);
