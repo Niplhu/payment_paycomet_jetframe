@@ -66,6 +66,7 @@ PaymentForm.include({
         this._jetframeCleanup();
         this._jetframeDismissOdooLoader();
         this._jetframePollTimer && window.clearInterval(this._jetframePollTimer);
+        this._jetframeOnMessage && window.removeEventListener('message', this._jetframeOnMessage);
 
         const backdrop = document.createElement('div');
         backdrop.id = BACKDROP_ID;
@@ -208,6 +209,18 @@ PaymentForm.include({
             inspectIframeLocation();
         }, 400);
 
+        // postMessage listener — receives the signal sent by _BREAKOUT_HTML
+        // even when the iframe's inline script is restricted by CSP.
+        this._jetframeOnMessage = (ev) => {
+            if (!ev.data || ev.data.type !== 'paycomet_jetframe_done') {
+                return;
+            }
+            window.removeEventListener('message', this._jetframeOnMessage);
+            this._jetframeOnMessage = null;
+            breakoutToTop(ev.data.dest || '/payment/status');
+        };
+        window.addEventListener('message', this._jetframeOnMessage);
+
         try {
             form.submit();
         } catch (_) {
@@ -276,6 +289,10 @@ PaymentForm.include({
         document.getElementById(OVERLAY_ID)?.remove();
         document.getElementById(BACKDROP_ID)?.remove();
         document.body.classList.remove('modal-open');
+        if (this._jetframeOnMessage) {
+            window.removeEventListener('message', this._jetframeOnMessage);
+            this._jetframeOnMessage = null;
+        }
         this._jetframeRestoreOdooLoaders?.();
     },
 });

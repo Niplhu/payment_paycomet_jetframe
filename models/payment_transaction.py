@@ -113,10 +113,11 @@ class PaymentTransaction(models.Model):
             raise ValidationError(_("La URL base pública de Odoo no es válida."))
 
         if parsed.scheme != 'https':
-            raise ValidationError(_(
-                "La URL base publica de Odoo debe usar HTTPS para Paycomet JET. "
-                "Actualiza web.base.url a una URL https:// valida."
-            ))
+            _logger.warning(
+                "Paycomet JET: La URL base publica usa HTTP en lugar de HTTPS (%s). "
+                "Paycomet requiere HTTPS en produccion; asegurate de configurar web.base.url correctamente.",
+                base_url,
+            )
         return base_url.rstrip('/')
 
     def _jetframe_build_order(self, processing_values=None):
@@ -305,8 +306,10 @@ class PaymentTransaction(models.Model):
             'lang': 'es',
         }
         try:
+            api_base = (self.provider_id.paycomet_api_url or 'https://rest.paycomet.com').rstrip('/')
+            errors_url = f"{api_base}/v1/errors"
             response = req_lib.post(
-                PAYCOMET_ERRORS_URL,
+                errors_url,
                 json=payload,
                 headers=self._jetframe_api_headers(),
                 timeout=20,
@@ -327,7 +330,11 @@ class PaymentTransaction(models.Model):
                 'order': order_ref,
             }
         }
-        endpoint = PAYCOMET_OPERATION_INFO_URL.format(order=order_ref)
+        op_info_template = (
+            self.provider_id.paycomet_operation_info_url
+            or PAYCOMET_OPERATION_INFO_URL
+        )
+        endpoint = op_info_template.format(order=order_ref)
         attempts = max(1, int(attempts or 1))
         for attempt in range(1, attempts + 1):
             try:
@@ -430,10 +437,19 @@ class PaymentTransaction(models.Model):
         }
 
         is_instant_credit = self._jetframe_is_instant_credit(processing_values=processing_values)
+        form_endpoint = provider.paycomet_form_url or PAYCOMET_FORM_URL
         if is_instant_credit:
-            payment_payload['methodId'] = PAYCOMET_METHOD_INSTANT_CREDIT
-            endpoint = PAYCOMET_PAYMENTS_URL
+            # IC uses /v1/form with methodId=33, secure=0 (no 3DS)
+            payment_payload.update({
+                'methodId': PAYCOMET_METHOD_INSTANT_CREDIT,
+                'methods': [PAYCOMET_METHOD_INSTANT_CREDIT],
+                'excludedMethods': [],
+                'secure': 0,
+                'urlNotification': url_notify,
+            })
+            endpoint = form_endpoint
             payload = {
+                'operationType': 1,
                 'language': 'es',
                 'payment': payment_payload,
             }
@@ -443,7 +459,7 @@ class PaymentTransaction(models.Model):
                 'excludedMethods': [],
                 'urlNotification': url_notify,
             })
-            endpoint = PAYCOMET_FORM_URL
+            endpoint = form_endpoint
             payload = {
                 'operationType': 1,
                 'language': 'es',
@@ -497,6 +513,11 @@ class PaymentTransaction(models.Model):
 
         challenge_url = self._jetframe_extract_challenge_url(data)
         if challenge_url and (error_code == 0 or not has_error_code):
+            # In test mode, IC returns production URLs — patch to test endpoint
+            if is_instant_credit and provider.state != 'enabled':
+                challenge_url = challenge_url.replace(
+                    '/api/transaction/', '/api/test/transaction/', 1
+                )
             return challenge_url
 
         _logger.warning("Paycomet JET: respuesta no usable endpoint=%s ref=%s body=%s", endpoint, self.reference, data)

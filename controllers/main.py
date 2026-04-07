@@ -32,6 +32,15 @@ _BREAKOUT_HTML = """\
     </div>
     <script>
         var dest = '/payment/status';
+        /* postMessage lets the parent frame react even when CSP blocks
+           navigation from a sandboxed / cross-origin context. */
+        try {
+            window.parent.postMessage(
+                {type: 'paycomet_jetframe_done', dest: dest},
+                window.location.origin
+            );
+        } catch (ignore) {}
+        /* Direct navigation — works in same-origin or top-level context. */
         try {
             if (window !== window.top) {
                 window.top.location.href = dest;
