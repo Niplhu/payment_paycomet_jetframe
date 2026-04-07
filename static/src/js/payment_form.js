@@ -1,8 +1,15 @@
 /** @odoo-module **/
 
-import paymentForm from '@payment/js/payment_form';
+import PaymentForm from '@payment/js/payment_form';
+import { _t } from '@web/core/l10n/translation';
 
-paymentForm.include({
+const OVERLAY_ID = 'o_jetframe_overlay';
+const BACKDROP_ID = 'o_jetframe_backdrop';
+const IFRAME_ID = 'o_jetframe_iframe';
+const LOADING_ID = 'o_jetframe_loading';
+const NOTICE_ID = 'o_jetframe_notice';
+
+PaymentForm.include({
     async _prepareInlineForm(providerId, providerCode, paymentOptionId, paymentMethodCode, flow) {
         if (providerCode !== 'jetframe') {
             await this._super(...arguments);
@@ -26,5 +33,207 @@ paymentForm.include({
             paymentMethodCode,
             processingValues,
         );
+    },
+
+    _processRedirectFlow(providerCode, paymentOptionId, paymentMethodCode, processingValues) {
+        if (providerCode !== 'jetframe') {
+            return this._super(...arguments);
+        }
+
+        const challengeUrl = this._jetframeExtractChallengeUrl(processingValues);
+        if (!challengeUrl) {
+            return this._super(...arguments);
+        }
+
+        this._jetframeOpenModal({
+            url: challengeUrl,
+            paymentMethodCode,
+        });
+    },
+
+    _jetframeExtractChallengeUrl(processingValues) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = processingValues.redirect_form_html || '';
+        return tmp.querySelector('form')?.getAttribute('action') || null;
+    },
+
+    _jetframeOpenModal({ url, paymentMethodCode }) {
+        this._jetframeCleanup();
+        this._jetframeDismissOdooLoader();
+
+        const isInstantCredit = paymentMethodCode === 'instant_credit';
+
+        const backdrop = document.createElement('div');
+        backdrop.id = BACKDROP_ID;
+        backdrop.className = 'modal-backdrop fade show';
+        document.body.appendChild(backdrop);
+
+        const modal = document.createElement('div');
+        modal.id = OVERLAY_ID;
+        modal.className = 'modal fade show';
+        modal.style.display = 'block';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-labelledby', 'o_jetframe_title');
+        modal.setAttribute('tabindex', '-1');
+
+        modal.innerHTML = `
+            <div class="modal-dialog modal-dialog-centered o_jetframe_dialog">
+                <div class="modal-content">
+                    <div class="modal-header o_jetframe_header">
+                        <h5 class="modal-title" id="o_jetframe_title">
+                            <svg xmlns="http://www.w3.org/2000/svg"
+                                 width="15" height="15" viewBox="0 0 24 24"
+                                 fill="none" stroke="currentColor"
+                                 stroke-width="2.5" stroke-linecap="round"
+                                 stroke-linejoin="round"
+                                 class="o_jetframe_lock_icon me-2"
+                                 aria-hidden="true">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                            </svg>
+                            ${_t('Pago seguro - Paycomet')}
+                        </h5>
+                        <button type="button"
+                                class="btn-close"
+                                id="o_jetframe_close"
+                                aria-label="${_t('Cerrar')}">
+                        </button>
+                    </div>
+
+                    <div class="modal-body p-0 o_jetframe_body">
+                        <div id="${LOADING_ID}" class="o_jetframe_loading">
+                            <div class="o_jetframe_spinner"></div>
+                            <span class="text-muted">${_t('Cargando formulario de pago...')}</span>
+                        </div>
+                        <div id="${NOTICE_ID}" class="o_jetframe_notice d-none"></div>
+                        <iframe
+                            id="${IFRAME_ID}"
+                            src="${url}"
+                            title="${_t('Formulario de pago seguro de Paycomet')}"
+                            allow="payment"
+                            class="o_jetframe_iframe d-none"
+                            scrolling="yes"
+                        ></iframe>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+        document.body.classList.add('modal-open');
+        modal.focus();
+
+        const iframe = modal.querySelector(`#${IFRAME_ID}`);
+        const loading = modal.querySelector(`#${LOADING_ID}`);
+        const notice = modal.querySelector(`#${NOTICE_ID}`);
+
+        const renderNotice = (message, actionLabel) => {
+            notice.classList.remove('d-none');
+            notice.innerHTML = `
+                <div class="alert alert-warning mb-0 rounded-0 border-0 border-top">
+                    <div class="small mb-2">${message}</div>
+                    <button type="button" class="btn btn-sm btn-primary" id="o_jetframe_open_top">
+                        ${actionLabel}
+                    </button>
+                </div>
+            `;
+            notice.querySelector('#o_jetframe_open_top')?.addEventListener('click', () => {
+                window.location.href = url;
+            });
+        };
+
+        let fallbackTimer = null;
+        if (isInstantCredit) {
+            fallbackTimer = window.setTimeout(() => {
+                renderNotice(
+                    _t('La financiacion puede ser bloqueada dentro del frame por Instant Credit. Si no ves el formulario, abre la financiacion en pagina completa.'),
+                    _t('Abrir financiacion fuera del frame'),
+                );
+            }, 1800);
+        }
+
+        iframe.addEventListener('load', () => {
+            loading.classList.add('d-none');
+            iframe.classList.remove('d-none');
+        }, { once: true });
+
+        iframe.addEventListener('error', () => {
+            loading.classList.add('d-none');
+            renderNotice(
+                _t('No se ha podido cargar el formulario dentro de esta ventana.'),
+                _t('Abrir pago fuera del frame'),
+            );
+        }, { once: true });
+
+        const close = () => {
+            if (fallbackTimer) {
+                window.clearTimeout(fallbackTimer);
+            }
+            this._jetframeCleanup();
+            this._jetframeEnablePayButton();
+        };
+
+        modal.querySelector('#o_jetframe_close').addEventListener('click', close);
+        modal.addEventListener('click', (ev) => {
+            if (ev.target === modal) {
+                close();
+            }
+        });
+
+        const onKeyDown = (ev) => {
+            if (ev.key === 'Escape') {
+                close();
+                document.removeEventListener('keydown', onKeyDown);
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
+    },
+
+    _jetframeEnablePayButton() {
+        if (typeof this._enableButton === 'function') {
+            this._enableButton();
+            return;
+        }
+        const btn = this.el && (
+            this.el.querySelector('button[name="o_payment_submit_button"]') ||
+            this.el.querySelector('.o_payment_submit_button') ||
+            this.el.querySelector('button[type="submit"]')
+        );
+        if (btn) {
+            btn.removeAttribute('disabled');
+            btn.classList.remove('disabled');
+        }
+    },
+
+    _jetframeDismissOdooLoader() {
+        try {
+            if (typeof window.$ !== 'undefined' && typeof window.$.unblockUI === 'function') {
+                window.$.unblockUI();
+            }
+        } catch (_) {
+            // ignore
+        }
+
+        for (const sel of ['.o_loading', '.o_blockUI', '.o_loader', '#o_loading']) {
+            document.querySelectorAll(sel).forEach((el) => {
+                el.dataset.jetframeHidden = '1';
+                el.style.display = 'none';
+            });
+        }
+    },
+
+    _jetframeRestoreOdooLoaders() {
+        document.querySelectorAll('[data-jetframe-hidden="1"]').forEach((el) => {
+            el.style.removeProperty('display');
+            delete el.dataset.jetframeHidden;
+        });
+    },
+
+    _jetframeCleanup() {
+        document.getElementById(OVERLAY_ID)?.remove();
+        document.getElementById(BACKDROP_ID)?.remove();
+        document.body.classList.remove('modal-open');
+        this._jetframeRestoreOdooLoaders?.();
     },
 });
