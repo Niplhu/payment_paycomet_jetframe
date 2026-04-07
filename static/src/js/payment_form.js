@@ -130,8 +130,13 @@ PaymentForm.include({
 
         const iframe = modal.querySelector(`#${IFRAME_ID}`);
         const loading = modal.querySelector(`#${LOADING_ID}`);
+        const form = redirectForm;
         const payUrl = redirectForm.getAttribute('action');
         let isClosed = false;
+
+        form.setAttribute('target', IFRAME_ID);
+        form.classList.add('d-none');
+        modal.appendChild(form);
 
         const breakoutToTop = (url = '/payment/status') => {
             if (isClosed) {
