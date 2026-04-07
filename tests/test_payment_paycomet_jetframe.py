@@ -3,6 +3,8 @@
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+import requests
+
 from odoo.exceptions import ValidationError
 from odoo.tests import tagged
 from odoo.tools import mute_logger
@@ -20,6 +22,19 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class _FakeHTTPErrorResponse(_FakeResponse):
+
+    def __init__(self, payload, status_code=422, text=''):
+        super().__init__(payload)
+        self.status_code = status_code
+        self.text = text
+
+    def raise_for_status(self):
+        error = requests.exceptions.HTTPError('http error', response=self)
+        error.response = self
+        raise error
 
 
 @tagged('post_install', '-at_install')
@@ -119,8 +134,8 @@ class TestPaycometJetframe(PaymentCommon):
             with self.assertRaises(ValidationError):
                 tx._get_specific_rendering_values({})
 
-    def test_instant_credit_rejects_amount_below_sandbox_minimum(self):
-        tx = self._create_transaction(flow='redirect', amount=153.67)
+    def test_instant_credit_rejects_amount_below_minimum(self):
+        tx = self._create_transaction(flow='redirect', amount=149.99)
         tx.payment_method_id = self.credit_payment_method
 
         with self.assertRaises(ValidationError):
@@ -148,6 +163,24 @@ class TestPaycometJetframe(PaymentCommon):
         customer = captured_payload['json']['payment']['merchantData']['customer']
         self.assertEqual(customer.get('mobilePhone'), '+34600112233')
         self.assertNotIn('phone', customer)
+
+    def test_rendering_values_surface_paycomet_http_422_message(self):
+        tx = self._create_transaction(flow='redirect', amount=200.0)
+        tx.payment_method_id = self.credit_payment_method
+
+        response = _FakeHTTPErrorResponse({
+            'errorCode': 1110,
+            'errorDescription': 'El importe mínimo requerido no se ha alcanzado.',
+        })
+
+        with patch(
+            'odoo.addons.payment_paycomet_jetframe.models.payment_transaction.req_lib.post',
+            return_value=response,
+        ):
+            with self.assertRaises(ValidationError) as err:
+                tx._get_specific_rendering_values({'payment_method_code': 'instant_credit'})
+
+        self.assertIn('importe mínimo', str(err.exception))
 
     def test_rendering_values_use_challenge_url_when_available(self):
         tx = self._create_transaction(flow='redirect')

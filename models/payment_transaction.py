@@ -31,10 +31,9 @@ PAYCOMET_DEFAULT_BASE_URL = "https://rest.paycomet.com"
 PAYCOMET_METHOD_CARD = 1           # Standard credit/debit card (3DS)
 PAYCOMET_METHOD_INSTANT_CREDIT = 33  # Sabadell Instant Credit financing
 
-# Instant Credit sandbox docs indicate supported test amounts between
-# 180 EUR and 800 EUR. Below that range the generated challenge can end up
-# failing later inside instantcredit.net instead of returning a clean API error.
-IC_MINIMUM_AMOUNT_EUR = 180.0
+# Current merchant setup uses 150 EUR as effective minimum for Instant Credit.
+# We only keep the upper sandbox guard from the public simulator docs.
+IC_MINIMUM_AMOUNT_EUR = 150.0
 IC_SANDBOX_MAXIMUM_AMOUNT_EUR = 800.0
 
 # Instant Credit is only available for Spanish residents.
@@ -288,8 +287,40 @@ class PaymentTransaction(models.Model):
             resp.raise_for_status()
             data = resp.json()
         except req_lib.exceptions.RequestException as exc:
+            response = getattr(exc, 'response', None)
+            response_data = None
+            response_text = None
+            if response is not None:
+                try:
+                    response_data = response.json()
+                except ValueError:
+                    response_text = response.text
+
+            if isinstance(response_data, dict):
+                api_error_code = _parse_error_code(response_data.get('errorCode'))
+                api_error_msg, is_cancel = _resolve_error(api_error_code)
+                final_msg = (
+                    response_data.get('errorDescription')
+                    or response_data.get('error', {}).get('message')
+                    or api_error_msg
+                )
+                _logger.error(
+                    "Paycomet JET: HTTP error en %s ref=%s status=%s code=%s body=%s",
+                    log_label, self.reference,
+                    getattr(response, 'status_code', None), api_error_code, response_data,
+                )
+                if final_msg:
+                    raise ValidationError(
+                        _("Paycomet: %s") % final_msg if not is_cancel else final_msg
+                    )
+
             _logger.error(
-                "Paycomet JET: red error en %s ref=%s: %s", log_label, self.reference, exc,
+                "Paycomet JET: red error en %s ref=%s status=%s body=%s exc=%s",
+                log_label,
+                self.reference,
+                getattr(response, 'status_code', None),
+                response_text,
+                exc,
             )
             raise ValidationError(
                 _("Error de comunicación con Paycomet. Inténtalo de nuevo.")
@@ -317,14 +348,14 @@ class PaymentTransaction(models.Model):
             )
             return challenge_url
 
-        error_msg, _ = _resolve_error(error_code)
+        error_msg, is_cancel = _resolve_error(error_code)
         final_msg = data.get('errorDescription') or error_msg or _("Error desconocido de Paycomet.")
         _logger.error(
             "Paycomet JET: %s error ref=%s code=%s desc=%s body=%s",
             log_label,
             self.reference, error_code, final_msg, data,
         )
-        raise ValidationError(_("Paycomet: %s") % final_msg)
+        raise ValidationError(final_msg if is_cancel else _("Paycomet: %s") % final_msg)
 
     # =========================================================================
     # Instant Credit — specific validations
