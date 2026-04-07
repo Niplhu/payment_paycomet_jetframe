@@ -604,13 +604,22 @@ class PaymentTransaction(models.Model):
         Patch an Instant Credit challengeUrl to its test equivalent when the
         payment provider is NOT in production mode.
 
-        Paycomet's test terminal returns the same instantcredit.net URL as
-        production. Loading the production URL with a test token results in
-        HTTP 500. The test endpoint is identical but has /test/ inserted after
-        /api/ in the path:
+        Instant Credit's own API documentation distinguishes test and
+        production by hostname, not by inserting `/test/` in the path:
 
-          Production: https://api.instantcredit.net/api/transaction/{token}/…
-          Test:       https://api.instantcredit.net/api/test/transaction/{token}/…
+          Production API: https://api.instantcredit.net/api/...
+          Test API:       https://test.instantcredit.net/api/...
+
+        Paycomet can still return a production-hosted challenge URL while the
+        payment provider is in test mode. In that case, loading the returned
+        URL with a sandbox token ends in an Instant Credit HTTP 500.
+
+        We therefore normalize sandbox URLs to the test host and standard test
+        path:
+
+          Production: https://api.instantcredit.net/api/transaction/{token}/...
+          Legacy test: https://api.instantcredit.net/api/test/transaction/{token}/...
+          Normalized:  https://test.instantcredit.net/api/transaction/{token}/...
 
         We apply the patch only when provider.state != 'enabled' so production
         traffic is never modified.
@@ -623,12 +632,17 @@ class PaymentTransaction(models.Model):
         if is_production:
             return challenge_url
 
-        # Insert /test/ if the URL matches the known IC production pattern
-        IC_PROD = 'api.instantcredit.net/api/transaction/'
-        IC_TEST = 'api.instantcredit.net/api/test/transaction/'
+        IC_PROD_HOST = 'https://api.instantcredit.net/api/'
+        IC_LEGACY_TEST = 'https://api.instantcredit.net/api/test/'
+        IC_TEST_HOST = 'https://test.instantcredit.net/api/'
 
-        if IC_PROD in challenge_url:
-            patched = challenge_url.replace(IC_PROD, IC_TEST, 1)
+        patched = challenge_url
+        if challenge_url.startswith(IC_LEGACY_TEST):
+            patched = challenge_url.replace(IC_LEGACY_TEST, IC_TEST_HOST, 1)
+        elif challenge_url.startswith(IC_PROD_HOST):
+            patched = challenge_url.replace(IC_PROD_HOST, IC_TEST_HOST, 1)
+
+        if patched != challenge_url:
             _logger.info(
                 "Paycomet JET IC: URL patched to test endpoint ref=%s\n  from: %s\n  to:   %s",
                 self.reference, challenge_url, patched,
@@ -636,13 +650,13 @@ class PaymentTransaction(models.Model):
             return patched
 
         # URL doesn't match the expected pattern — return as-is and log a warning
-        # so the developer can verify the correct test pattern with Paycomet.
         _logger.warning(
             "Paycomet JET IC: provider is in test mode but challengeUrl does not "
-            "contain the expected pattern '%s'.\n  URL: %s\n  "
-            "If your test IC endpoint has a different pattern, update "
+            "match the expected Instant Credit API host.\n  URL: %s\n  "
+            "Expected prefixes: '%s' or '%s'.\n  "
+            "If your merchant account uses a different test endpoint, update "
             "_jetframe_ic_test_url() accordingly.",
-            IC_PROD, challenge_url,
+            challenge_url, IC_PROD_HOST, IC_LEGACY_TEST,
         )
         return challenge_url
 

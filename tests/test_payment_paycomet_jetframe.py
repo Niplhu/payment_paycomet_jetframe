@@ -210,6 +210,32 @@ class TestPaycometJetframe(PaymentCommon):
 
         self.assertEqual(values['form_url'], 'https://example.com/challenge')
 
+    def test_ic_test_url_switches_to_test_host(self):
+        tx = self._create_transaction(flow='redirect')
+        tx.provider_id.state = 'test'
+
+        patched = tx._jetframe_ic_test_url(
+            'https://api.instantcredit.net/api/transaction/token123/installments/selector'
+        )
+
+        self.assertEqual(
+            patched,
+            'https://test.instantcredit.net/api/transaction/token123/installments/selector',
+        )
+
+    def test_ic_test_url_normalizes_legacy_test_path(self):
+        tx = self._create_transaction(flow='redirect')
+        tx.provider_id.state = 'test'
+
+        patched = tx._jetframe_ic_test_url(
+            'https://api.instantcredit.net/api/test/transaction/token123/installments/selector'
+        )
+
+        self.assertEqual(
+            patched,
+            'https://test.instantcredit.net/api/transaction/token123/installments/selector',
+        )
+
     def test_get_tx_from_notification_data_requires_reference_or_order(self):
         tx = self._create_transaction(flow='redirect')
         with self.assertRaises(ValidationError):
