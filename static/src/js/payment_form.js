@@ -65,6 +65,7 @@ PaymentForm.include({
     _jetframeOpenModal(redirectForm) {
         this._jetframeCleanup();
         this._jetframeDismissOdooLoader();
+        this._jetframePollTimer && window.clearInterval(this._jetframePollTimer);
 
         const backdrop = document.createElement('div');
         backdrop.id = BACKDROP_ID;
@@ -129,12 +130,49 @@ PaymentForm.include({
         const iframe = modal.querySelector(`#${IFRAME_ID}`);
         const loading = modal.querySelector(`#${LOADING_ID}`);
         const form = redirectForm;
+        let isClosed = false;
+
+        const breakoutToTop = (url = '/payment/status') => {
+            if (isClosed) {
+                return;
+            }
+            isClosed = true;
+            if (this._jetframePollTimer) {
+                window.clearInterval(this._jetframePollTimer);
+                this._jetframePollTimer = null;
+            }
+            this._jetframeCleanup();
+            window.location.href = url;
+        };
+
+        const inspectIframeLocation = () => {
+            try {
+                const href = iframe.contentWindow?.location?.href;
+                if (!href || href === 'about:blank') {
+                    return false;
+                }
+                const parsed = new URL(href, window.location.origin);
+                if (parsed.origin !== window.location.origin) {
+                    return false;
+                }
+                if (parsed.pathname === '/payment/jetframe/return' || parsed.pathname === '/payment/status') {
+                    breakoutToTop('/payment/status');
+                    return true;
+                }
+            } catch (_) {
+                // Cross-origin while Paycomet is loaded; ignore until it returns to our domain.
+            }
+            return false;
+        };
 
         form.setAttribute('target', IFRAME_ID);
         form.classList.add('d-none');
         modal.appendChild(form);
 
         const onIframeLoad = () => {
+            if (inspectIframeLocation()) {
+                return;
+            }
             try {
                 if (iframe.contentWindow?.location?.href === 'about:blank') {
                     return;
@@ -157,9 +195,18 @@ PaymentForm.include({
         }, { once: true });
 
         const close = () => {
+            isClosed = true;
+            if (this._jetframePollTimer) {
+                window.clearInterval(this._jetframePollTimer);
+                this._jetframePollTimer = null;
+            }
             this._jetframeCleanup();
             this._jetframeEnablePayButton();
         };
+
+        this._jetframePollTimer = window.setInterval(() => {
+            inspectIframeLocation();
+        }, 400);
 
         try {
             form.submit();
