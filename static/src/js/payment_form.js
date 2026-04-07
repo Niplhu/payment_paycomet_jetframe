@@ -39,7 +39,7 @@ PaymentForm.include({
             return this._super(...arguments);
         }
 
-        if (paymentMethodCode === 'instant_credit') {
+        if (!this._jetframeShouldUseModal(paymentMethodCode)) {
             return this._super(...arguments);
         }
 
@@ -49,6 +49,10 @@ PaymentForm.include({
         }
 
         this._jetframeOpenModal(challengeUrl);
+    },
+
+    _jetframeShouldUseModal(paymentMethodCode) {
+        return paymentMethodCode !== 'instant_credit';
     },
 
     _jetframeExtractChallengeUrl(processingValues) {

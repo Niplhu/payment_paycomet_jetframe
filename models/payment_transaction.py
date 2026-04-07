@@ -203,7 +203,16 @@ class PaymentTransaction(models.Model):
 
         for candidate in candidates:
             try:
-                ipaddress.ip_address(candidate)
+                ip_obj = ipaddress.ip_address(candidate)
+                if (
+                    ip_obj.is_private
+                    or ip_obj.is_loopback
+                    or ip_obj.is_link_local
+                    or ip_obj.is_reserved
+                    or ip_obj.is_multicast
+                    or ip_obj.is_unspecified
+                ):
+                    continue
                 return candidate
             except ValueError:
                 continue

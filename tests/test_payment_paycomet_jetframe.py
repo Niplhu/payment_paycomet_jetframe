@@ -278,3 +278,28 @@ class TestPaycometJetframe(PaymentCommon):
 
         self.assertEqual(tx.state, 'error')
         self.assertIn('Fondos insuficientes', tx.state_message)
+
+    def test_client_ip_ignores_private_proxy_addresses(self):
+        tx = self._create_transaction(flow='redirect')
+        httprequest = Mock()
+        httprequest.headers = {
+            'X-Forwarded-For': '10.0.0.5, 192.168.1.10',
+            'X-Real-IP': '127.0.0.1',
+        }
+        httprequest.remote_addr = '172.16.0.2'
+
+        with patch('odoo.addons.payment_paycomet_jetframe.models.payment_transaction.request') as request_mock:
+            request_mock.httprequest = httprequest
+            self.assertFalse(tx._jetframe_get_client_ip())
+
+    def test_client_ip_keeps_public_forwarded_address(self):
+        tx = self._create_transaction(flow='redirect')
+        httprequest = Mock()
+        httprequest.headers = {
+            'X-Forwarded-For': '88.12.34.56, 10.0.0.5',
+        }
+        httprequest.remote_addr = '172.16.0.2'
+
+        with patch('odoo.addons.payment_paycomet_jetframe.models.payment_transaction.request') as request_mock:
+            request_mock.httprequest = httprequest
+            self.assertEqual(tx._jetframe_get_client_ip(), '88.12.34.56')
