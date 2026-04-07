@@ -63,45 +63,4 @@
         </field>
     </record>
 
-    <!-- =====================================================================
-         Payment Transaction list — extra Paycomet columns (optional)
-         ===================================================================== -->
-    <record id="payment_transaction_list_jetframe" model="ir.ui.view">
-        <field name="name">payment.transaction.list.jetframe</field>
-        <field name="model">payment.transaction</field>
-        <field name="inherit_id" ref="payment.payment_transaction_list"/>
-        <field name="arch" type="xml">
-            <xpath expr="//field[@name='reference']" position="after">
-                <field name="paycomet_order"
-                       optional="hide"
-                       string="Orden Paycomet"/>
-                <field name="paycomet_is_instant_credit"
-                       optional="hide"
-                       string="Instant Credit"
-                       widget="boolean"/>
-            </xpath>
-        </field>
-    </record>
-
-    <!-- =====================================================================
-         Payment Transaction form — Paycomet detail fields
-         ===================================================================== -->
-    <record id="payment_transaction_form_jetframe" model="ir.ui.view">
-        <field name="name">payment.transaction.form.jetframe</field>
-        <field name="model">payment.transaction</field>
-        <field name="inherit_id" ref="payment.payment_transaction_form"/>
-        <field name="arch" type="xml">
-            <xpath expr="//field[@name='reference']" position="after">
-                <field name="paycomet_order"
-                       invisible="provider_code != 'jetframe'"
-                       readonly="1"
-                       string="Referencia Paycomet (order)"/>
-                <field name="paycomet_is_instant_credit"
-                       invisible="provider_code != 'jetframe'"
-                       readonly="1"
-                       string="Financiación Instant Credit"/>
-            </xpath>
-        </field>
-    </record>
-
 </odoo>
