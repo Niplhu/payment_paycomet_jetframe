@@ -57,6 +57,33 @@ _BREAKOUT_HTML = """\
 
 class PaycometJetController(http.Controller):
 
+    @http.route('/payment/jetframe/status', type='json', auth='public')
+    def jetframe_status(self, reference=None, order=None, **kwargs):
+        tx = request.env['payment.transaction'].sudo()
+        if reference:
+            tx = tx.search([
+                ('reference', '=', reference),
+                ('provider_code', '=', 'jetframe'),
+            ], limit=1)
+        elif order:
+            tx = tx.search([
+                ('paycomet_order', '=', order),
+                ('provider_code', '=', 'jetframe'),
+            ], limit=1)
+        else:
+            tx = request.env['payment.transaction']
+
+        if not tx:
+            return {'found': False}
+
+        return {
+            'found': True,
+            'state': tx.state,
+            'state_message': tx.state_message,
+            'reference': tx.reference,
+            'landing_route': tx.landing_route,
+        }
+
     @http.route('/payment/jetframe/return', type='http', auth='public', methods=['GET', 'POST'], csrf=False)
     def jetframe_return(self, **data):
         notification = _normalise_paycomet_params(data)

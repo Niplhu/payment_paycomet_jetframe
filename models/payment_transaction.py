@@ -82,6 +82,8 @@ class PaymentTransaction(models.Model):
 
         values.update({
             'form_url': form_url,
+            'reference': self.reference,
+            'order': self.paycomet_order or self._jetframe_build_order(processing_values=processing_values),
         })
         return values
 

@@ -66,6 +66,7 @@ PaymentForm.include({
         this._jetframeCleanup();
         this._jetframeDismissOdooLoader();
         this._jetframePollTimer && window.clearInterval(this._jetframePollTimer);
+        this._jetframeStatusTimer && window.clearInterval(this._jetframeStatusTimer);
         this._jetframeOnMessage && window.removeEventListener('message', this._jetframeOnMessage);
 
         const backdrop = document.createElement('div');
@@ -131,7 +132,8 @@ PaymentForm.include({
         const iframe = modal.querySelector(`#${IFRAME_ID}`);
         const loading = modal.querySelector(`#${LOADING_ID}`);
         const form = redirectForm;
-        const payUrl = redirectForm.getAttribute('action');
+        const txReference = form.querySelector('input[name="reference"]')?.value || null;
+        const txOrder = form.querySelector('input[name="order"]')?.value || null;
         let isClosed = false;
 
         form.setAttribute('target', IFRAME_ID);
@@ -146,6 +148,10 @@ PaymentForm.include({
             if (this._jetframePollTimer) {
                 window.clearInterval(this._jetframePollTimer);
                 this._jetframePollTimer = null;
+            }
+            if (this._jetframeStatusTimer) {
+                window.clearInterval(this._jetframeStatusTimer);
+                this._jetframeStatusTimer = null;
             }
             this._jetframeCleanup();
             window.location.href = url;
@@ -202,6 +208,10 @@ PaymentForm.include({
                 window.clearInterval(this._jetframePollTimer);
                 this._jetframePollTimer = null;
             }
+            if (this._jetframeStatusTimer) {
+                window.clearInterval(this._jetframeStatusTimer);
+                this._jetframeStatusTimer = null;
+            }
             this._jetframeCleanup();
             this._jetframeEnablePayButton();
         };
@@ -209,6 +219,32 @@ PaymentForm.include({
         this._jetframePollTimer = window.setInterval(() => {
             inspectIframeLocation();
         }, 400);
+
+        this._jetframeStatusTimer = window.setInterval(async () => {
+            if (isClosed || (!txReference && !txOrder)) {
+                return;
+            }
+            try {
+                const response = await fetch('/payment/jetframe/status', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        jsonrpc: '2.0',
+                        method: 'call',
+                        params: {reference: txReference, order: txOrder},
+                        id: Date.now(),
+                    }),
+                    credentials: 'same-origin',
+                });
+                const payload = await response.json();
+                const result = payload?.result;
+                if (result?.found && result.state && result.state !== 'draft') {
+                    breakoutToTop(result.landing_route || '/payment/status');
+                }
+            } catch (_) {
+                // Ignore transient polling errors while the hosted flow is active.
+            }
+        }, 1200);
 
         // postMessage listener — receives the signal sent by _BREAKOUT_HTML
         // even when the iframe's inline script is restricted by CSP.
@@ -293,6 +329,10 @@ PaymentForm.include({
         if (this._jetframeOnMessage) {
             window.removeEventListener('message', this._jetframeOnMessage);
             this._jetframeOnMessage = null;
+        }
+        if (this._jetframeStatusTimer) {
+            window.clearInterval(this._jetframeStatusTimer);
+            this._jetframeStatusTimer = null;
         }
         this._jetframeRestoreOdooLoaders?.();
     },
