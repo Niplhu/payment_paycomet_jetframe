@@ -51,8 +51,11 @@ PaymentForm.include({
         this._jetframeOpenModal(redirectForm);
     },
 
-    _jetframeShouldUseModal(paymentMethodCode) {
-        return paymentMethodCode !== 'instant_credit';
+    _jetframeShouldUseModal(paymentMethodCode) {  // eslint-disable-line no-unused-vars
+        // Todos los métodos (incluyendo instant_credit) usan el modal.
+        // El JetFrame de Paycomet soporta iframe embedding para todos sus métodos,
+        // incluida la Financiación Instantánea (methodId=33).
+        return true;
     },
 
     _jetframeExtractRedirectForm(processingValues) {
@@ -117,7 +120,7 @@ PaymentForm.include({
                             name="${IFRAME_ID}"
                             title="${_t('Formulario de pago seguro de Paycomet')}"
                             allow="payment"
-                            sandbox="allow-top-navigation allow-scripts allow-same-origin allow-forms allow-popups"
+                            sandbox="allow-top-navigation allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
                             referrerpolicy="strict-origin-when-cross-origin"
                             class="o_jetframe_iframe d-none"
                             scrolling="yes"
@@ -152,6 +155,10 @@ PaymentForm.include({
                 window.clearInterval(this._jetframeStatusTimer);
                 this._jetframeStatusTimer = null;
             }
+            if (this._jetframeLoadingMsgTimer) {
+                window.clearTimeout(this._jetframeLoadingMsgTimer);
+                this._jetframeLoadingMsgTimer = null;
+            }
             this._jetframeCleanup();
             window.location.href = url;
         };
@@ -180,16 +187,29 @@ PaymentForm.include({
             if (inspectIframeLocation()) {
                 return;
             }
+            // Determinar si el iframe está en estado en blanco (navegación en curso
+            // o contenido bloqueado por X-Frame-Options del banco durante 3DS).
+            let isBlank = false;
             try {
-                if (iframe.contentWindow?.location?.href === 'about:blank') {
-                    return;
-                }
+                const currentHref = iframe.contentWindow?.location?.href;
+                isBlank = !currentHref || currentHref === 'about:blank';
             } catch (_) {
-                // Cross-origin access means the remote page is already loaded.
+                // DOMException cross-origin: la página remota está cargada — no es blank.
+                isBlank = false;
             }
+            if (isBlank) {
+                // Estado transitorio durante redirecciones 3DS/IC:
+                // mostrar spinner hasta que cargue la siguiente página real.
+                loading.classList.remove('d-none');
+                iframe.classList.add('d-none');
+                return;
+            }
+            // Página cargada correctamente — ocultar spinner y mostrar iframe.
             loading.classList.add('d-none');
             iframe.classList.remove('d-none');
-            iframe.removeEventListener('load', onIframeLoad);
+            // IMPORTANTE: NO eliminar el listener. Debe permanecer activo para
+            // manejar todas las navegaciones del flujo 3DS/IC:
+            //   formulario Paycomet → ACS banco → callback Paycomet → urlOk/urlKo
         };
         iframe.addEventListener('load', onIframeLoad);
 
@@ -201,6 +221,25 @@ PaymentForm.include({
                 </div>`;
         }, { once: true });
 
+        // Mensaje de ayuda si el spinner lleva demasiado tiempo visible
+        // (p.ej. ACS del banco bloqueado por X-Frame-Options durante 3DS,
+        // o formulario de Financiación en proceso multi-paso).
+        this._jetframeLoadingMsgTimer = window.setTimeout(() => {
+            if (isClosed) {
+                return;
+            }
+            // Solo actualizar el mensaje si el spinner sigue visible (iframe oculto).
+            if (iframe.classList.contains('d-none')) {
+                const span = loading.querySelector('span.text-muted');
+                if (span) {
+                    span.textContent = _t(
+                        'Autenticando con su banco… Si se ha abierto una ventana emergente, ' +
+                        'complétela allí y esta pantalla se actualizará automáticamente.'
+                    );
+                }
+            }
+        }, 12000);
+
         const close = () => {
             isClosed = true;
             if (this._jetframePollTimer) {
@@ -210,6 +249,10 @@ PaymentForm.include({
             if (this._jetframeStatusTimer) {
                 window.clearInterval(this._jetframeStatusTimer);
                 this._jetframeStatusTimer = null;
+            }
+            if (this._jetframeLoadingMsgTimer) {
+                window.clearTimeout(this._jetframeLoadingMsgTimer);
+                this._jetframeLoadingMsgTimer = null;
             }
             this._jetframeCleanup();
             this._jetframeEnablePayButton();
@@ -251,9 +294,13 @@ PaymentForm.include({
             }
         }, 1200);
 
-        // postMessage listener — receives the signal sent by _BREAKOUT_HTML
-        // even when the iframe's inline script is restricted by CSP.
+        // postMessage listener — recibe la señal enviada por _BREAKOUT_HTML
+        // incluso cuando los scripts inline del iframe están restringidos por CSP.
+        // Se valida el origen para aceptar solo mensajes de nuestro propio servidor.
         this._jetframeOnMessage = (ev) => {
+            if (ev.origin !== window.location.origin) {
+                return;
+            }
             if (!ev.data || ev.data.type !== 'paycomet_jetframe_done') {
                 return;
             }
@@ -332,6 +379,14 @@ PaymentForm.include({
         if (this._jetframeStatusTimer) {
             window.clearInterval(this._jetframeStatusTimer);
             this._jetframeStatusTimer = null;
+        }
+        if (this._jetframePollTimer) {
+            window.clearInterval(this._jetframePollTimer);
+            this._jetframePollTimer = null;
+        }
+        if (this._jetframeLoadingMsgTimer) {
+            window.clearTimeout(this._jetframeLoadingMsgTimer);
+            this._jetframeLoadingMsgTimer = null;
         }
         this._jetframeRestoreOdooLoaders?.();
     },

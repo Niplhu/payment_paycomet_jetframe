@@ -14,6 +14,8 @@ _BREAKOUT_HTML = """\
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <title>Procesando pago...</title>
+    <!-- Fallback: meta-refresh si los scripts inline están bloqueados por CSP -->
+    <meta http-equiv="refresh" content="4;url=/payment/status"/>
     <style>
         body { font-family: system-ui, sans-serif; display: flex;
                align-items: center; justify-content: center;
@@ -31,25 +33,34 @@ _BREAKOUT_HTML = """\
         <p>Procesando, por favor espere&hellip;</p>
     </div>
     <script>
-        var dest = '/payment/status';
-        /* postMessage lets the parent frame react even when CSP blocks
-           navigation from a sandboxed / cross-origin context. */
-        try {
-            window.parent.postMessage(
-                {type: 'paycomet_jetframe_done', dest: dest},
-                window.location.origin
-            );
-        } catch (ignore) {}
-        /* Direct navigation — works in same-origin or top-level context. */
-        try {
-            if (window !== window.top) {
-                window.top.location.href = dest;
-            } else {
+        (function () {
+            var dest = '/payment/status';
+
+            /* 1. postMessage al frame padre (funciona aunque CSP bloquee
+                  navegación directa desde un iframe con sandbox). */
+            try {
+                window.parent.postMessage(
+                    {type: 'paycomet_jetframe_done', dest: dest},
+                    window.location.origin
+                );
+            } catch (ignore) {}
+
+            /* 2. Navegación directa — funciona en contexto same-origin o
+                  cuando la página se sirve en el nivel superior (3DS redirect
+                  de página completa). */
+            try {
+                if (window !== window.top) {
+                    /* Estamos dentro del iframe — navegar la ventana raíz. */
+                    window.top.location.href = dest;
+                } else {
+                    /* Contexto de nivel superior (retorno 3DS full-page). */
+                    window.location.href = dest;
+                }
+            } catch (e) {
+                /* Último recurso: navegar la ventana actual. */
                 window.location.href = dest;
             }
-        } catch (e) {
-            window.location.href = dest;
-        }
+        })();
     </script>
 </body>
 </html>"""
